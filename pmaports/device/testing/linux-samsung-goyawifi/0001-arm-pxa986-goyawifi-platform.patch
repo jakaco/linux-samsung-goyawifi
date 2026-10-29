@@ -1,0 +1,4452 @@
+Subject: [PATCH 1/4] SM-T110 local port: arm-pxa986-goyawifi-platform
+
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -160,6 +160,7 @@
+ # during boot, and this offset is critical to the functioning of
+ # kexec-tools.
+ textofs-y	:= 0x00008000
++textofs-$(CONFIG_MACH_PXA98X_DT) := 0x00108000
+ # RTD1195 has Boot ROM at start of address space
+ textofs-$(CONFIG_ARCH_REALTEK)  := 0x00108000
+ # SA1111 DMA bug: we don't want the kernel to live in precious DMA-able memory
+diff --git a/arch/arm/boot/compressed/head.S b/arch/arm/boot/compressed/head.S
+--- a/arch/arm/boot/compressed/head.S
++++ b/arch/arm/boot/compressed/head.S
+@@ -308,6 +308,10 @@
+ 		bl	fdt_check_mem_start
+ 1:
+ #endif /* CONFIG_USE_OF */
++		/* SM-T110 loader puts zImage at 0x10008000; low RAM starts at 0. */
++#ifdef CONFIG_MACH_PXA98X_DT
++		mov	r0, #0
++#endif
+ 		/* Determine final kernel image address. */
+ 		add	r4, r0, #TEXT_OFFSET
+ #else
+@@ -1021,7 +1025,7 @@
+ 		W(b)	__armv3_mpu_cache_on
+ 		W(b)	__armv3_mpu_cache_off
+ 		W(b)	__armv3_mpu_cache_flush
+-		
++
+ 		.word	0x41009400		@ ARM94x
+ 		.word	0xff00ff00
+ 		W(b)	__armv4_mpu_cache_on
+@@ -1237,7 +1241,7 @@
+ 		mcrne	p15, 0, ip, c7, c5, 0	@ invalidate I cache
+ 		mcr	p15, 0, ip, c7, c10, 4	@ drain WB
+ 		mov	pc, lr
+-		
++
+ __fa526_cache_flush:
+ 		tst	r4, #1
+ 		movne	pc, lr
+diff --git a/arch/arm/boot/dts/marvell/Makefile b/arch/arm/boot/dts/marvell/Makefile
+--- a/arch/arm/boot/dts/marvell/Makefile
++++ b/arch/arm/boot/dts/marvell/Makefile
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
++dtb-$(CONFIG_MACH_PXA98X_DT) += pxa986-samsung-goyawifi.dtb
+ dtb-$(CONFIG_ARCH_MMP) += \
+ 	pxa168-aspenite.dtb \
+ 	pxa910-dkb.dtb \
+diff --git a/arch/arm/boot/dts/marvell/pxa986-samsung-goyawifi.dts b/arch/arm/boot/dts/marvell/pxa986-samsung-goyawifi.dts
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/boot/dts/marvell/pxa986-samsung-goyawifi.dts
+@@ -0,0 +1,371 @@
++/dts-v1/;
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++/ {
++	model = "Samsung Galaxy Tab 3 Lite SM-T110";
++	compatible = "samsung,goyawifi", "marvell,pxa986";
++	#address-cells = <1>;
++	#size-cells = <1>;
++	interrupt-parent = <&gic>;
++	aliases { i2c0 = &camera_i2c; serial2 = &gps_uart; i2c5 = &sensor_i2c; i2c6 = &charger_i2c; i2c7 = &muic_i2c; i2c1 = &touch_i2c; i2c2 = &pmic_i2c; mmc0 = &emmc; mmc1 = &wifi; mmc2 = &microsd; };
++
++	gpio_clock: gpio-clock { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <13000000>; };
++	gpio: gpio@d4019000 {
++		compatible = "marvell,mmp-gpio";
++        samsung,goyawifi-s2idle-wake-parent;
++		reg = <0xd4019000 0x1000>;
++		gpio-controller; #gpio-cells = <2>;
++		interrupt-controller; #interrupt-cells = <2>; #address-cells = <0>;
++		interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "gpio_mux";
++		clocks = <&gpio_clock>;
++	};
++
++ camera_clock: camera-clock@d4282850 {
++  compatible="samsung,t110-camera-clock";
++  reg=<0xd4282850 4>,<0xd4282888 4>,<0xd428284c 4>;
++  #clock-cells=<0>;
++ };
++ ccic: camera@d420a000 {
++  compatible="samsung,t110-ccic","marvell,mmp2-ccic";
++  reg=<0xd420a000 0x1000>;interrupts=<GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>;
++  clocks=<&camera_clock>,<&camera_clock>,<&camera_clock>;
++  clock-names="axi","func","phy";
++  #clock-cells=<0>;clock-output-names="t110-camera-mclk";
++  port { ccic_in: endpoint {remote-endpoint=<&sensor_out>;bus-type=<4>;clock-lanes=<0>;data-lanes=<1>;}; };
++ };
++ camera_i2c: i2c-camera {
++  compatible="i2c-gpio";
++  sda-gpios=<&gpio 54 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>;
++  scl-gpios=<&gpio 53 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>;
++  i2c-gpio,delay-us=<5>;i2c-gpio,timeout-ms=<100>;
++  #address-cells=<1>;#size-cells=<0>;
++  sensor@20 {
++   compatible="siliconfile,sr200pc20m";reg=<0x20>;clocks=<&ccic>;
++   io-enable-gpios=<&gpio 79 GPIO_ACTIVE_HIGH>;
++   analog-enable-gpios=<&gpio 80 GPIO_ACTIVE_HIGH>;
++   standby-gpios=<&gpio 14 GPIO_ACTIVE_HIGH>;
++   reset-gpios=<&gpio 15 GPIO_ACTIVE_LOW>;
++   port {sensor_out: endpoint {remote-endpoint=<&ccic_in>;bus-type=<4>;clock-lanes=<0>;data-lanes=<1>;};};
++  };
++ };
++ gps_uart_clock: gps-uart-clock { compatible="fixed-clock"; #clock-cells=<0>; clock-frequency=<14745600>; };
++ gps_uart: serial@d4018000 {
++  compatible="mrvl,mmp-uart"; reg=<0xd4018000 0x1000>;
++  interrupts=<GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
++  reg-shift=<2>; reg-io-width=<4>; clocks=<&gps_uart_clock>;
++ };
++ gps-control {
++  compatible="samsung,t110-gps-control";
++  vcc-supply=<&gps_ldo>;
++  reset-gpios=<&gpio 5 GPIO_ACTIVE_LOW>;
++  onoff-gpios=<&gpio 52 GPIO_ACTIVE_HIGH>;
++  clock-gpios=<&gpio 89 GPIO_ACTIVE_HIGH>;
++ };
++ sensor_i2c: i2c-sensors {
++  compatible = "i2c-gpio";
++  sda-gpios = <&gpio 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  scl-gpios = <&gpio 35 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  i2c-gpio,delay-us = <5>; i2c-gpio,timeout-ms = <100>;
++  #address-cells = <1>; #size-cells = <0>;
++  accelerometer@18 {
++   compatible = "bosch,bma255"; reg = <0x18>;
++   vdd-supply = <&sensor_ldo>;
++   /* VDDIO remains supplied by the existing board setup. */
++   interrupt-parent = <&gpio>; interrupts = <10 IRQ_TYPE_EDGE_RISING>;
++   interrupt-names = "INT1";
++   mount-matrix = "-1", "0", "0", "0", "1", "0", "0", "0", "-1";
++  };
++ };
++ charger_i2c: i2c-charger {
++  compatible = "i2c-gpio";
++  sda-gpios = <&gpio 17 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  scl-gpios = <&gpio 16 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  i2c-gpio,delay-us = <10>; i2c-gpio,timeout-ms = <100>;
++  #address-cells = <1>; #size-cells = <0>;
++  charger@34 { compatible = "samsung,t110-smb328"; reg = <0x34>; };
++ };
++ muic_i2c: i2c-muic {
++  compatible = "i2c-gpio";
++  sda-gpios = <&gpio 50 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  scl-gpios = <&gpio 49 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++  i2c-gpio,delay-us = <10>; i2c-gpio,timeout-ms = <100>;
++  #address-cells = <1>; #size-cells = <0>;
++ };
++	keys {
++		compatible = "gpio-keys";
++		volume-up { label = "Volume Up"; linux,code = <KEY_VOLUMEUP>; gpios = <&gpio 1 GPIO_ACTIVE_LOW>; debounce-interval = <30>; };
++		volume-down { label = "Volume Down"; linux,code = <KEY_VOLUMEDOWN>; gpios = <&gpio 2 GPIO_ACTIVE_LOW>; debounce-interval = <30>; };
++		home { label = "Home"; wakeup-source; linux,code = <KEY_HOME>; gpios = <&gpio 13 GPIO_ACTIVE_LOW>; debounce-interval = <30>; };
++	};
++	touch_i2c: i2c@d4010800 {
++        samsung,goyawifi-shared-bus;
++        sleep-scl-gpios = <&gpio 87 GPIO_ACTIVE_HIGH>;
++        sleep-sda-gpios = <&gpio 88 GPIO_ACTIVE_HIGH>;
++		compatible = "mrvl,mmp-twsi";
++		reg = <0xd4010800 0x60>;
++		interrupts = <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&pmic_clock>;
++		#address-cells = <1>; #size-cells = <0>;
++		backlight@64 {
++			compatible = "samsung,t110-vx5b3d-backlight";
++            bridge-core-supply = <&bridge_core>;
++            bridge-io-supply = <&bridge_io>;
++            panel-enable-gpios = <&gpio 9 GPIO_ACTIVE_HIGH>;
++            led-enable-gpios = <&gpio 12 GPIO_ACTIVE_HIGH>;
++            bridge-enable-gpios = <&gpio 19 GPIO_ACTIVE_HIGH>;
++            bridge-reset-gpios = <&gpio 20 GPIO_ACTIVE_HIGH>;
++
++			reg = <0x64>;
++		};
++		touchscreen@20 {
++			compatible = "zinitix,bt532";
++			reg = <0x20>;
++			interrupt-parent = <&gpio>;
++			interrupts = <94 IRQ_TYPE_EDGE_FALLING>;
++			vcca-supply = <&touch_ldo>;
++			/* Digital IO rail remains supplied by the existing board setup. */
++			touchscreen-size-x = <600>;
++			touchscreen-size-y = <1024>;
++			touchscreen-inverted-x;
++			touchscreen-swapped-x-y;
++			zinitix,mode = <0>;
++		};
++	};
++
++	soc_thermal: thermal-sensor@d4013200 {
++		compatible = "samsung,t110-pxa986-thermal";
++		reg = <0xd4013200 0x34>;
++		#thermal-sensor-cells = <0>;
++	};
++	thermal-zones {
++		pxa986-hot {
++			polling-delay = <2000>;
++			polling-delay-passive = <2000>;
++			thermal-sensors = <&soc_thermal>;
++			cooling-maps { cpu-limit { trip = <&passive>; cooling-device = <&cpu0 0 3>; }; gpu-limit { trip = <&passive>; cooling-device = <&gc_gpu 0 3>; }; };
++			trips {
++				passive: passive { temperature = <95000>; hysteresis = <5000>; type = "passive"; };
++				critical { temperature = <110000>; hysteresis = <5000>; type = "critical"; };
++			};
++		};
++	};
++	emmc_clock: emmc-clock {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <52000000>;
++	};
++
++	wifi_pwrseq: wifi-pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		reset-gpios = <&gpio 51 GPIO_ACTIVE_LOW>;
++		post-power-on-delay-ms = <20>;
++	};
++	wifi: mmc@d4280800 {
++		compatible = "mrvl,pxav3-mmc";
++		reg = <0xd4280800 0x120>;
++		interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&emmc_clock>;
++		clock-names = "io";
++		bus-width = <4>;
++		max-frequency = <26000000>;
++		non-removable;
++		no-sd; no-mmc; no-1-8-v;
++		cap-sdio-irq;
++        keep-power-in-suspend;
++		vmmc-supply = <&wifi_ldo>;
++		mmc-pwrseq = <&wifi_pwrseq>;
++		mrvl,clk-delay-cycles = <15>;
++	};
++	microsd: mmc@d4280000 {
++		compatible = "mrvl,pxav3-mmc";
++		reg = <0xd4280000 0x120>;
++		interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&emmc_clock>;
++		clock-names = "io";
++		bus-width = <4>;
++		max-frequency = <26000000>;
++		cd-gpios = <&gpio 11 GPIO_ACTIVE_LOW>;
++		cd-debounce-delay-ms = <200>;
++		disable-wp;
++		no-mmc; no-sdio; no-1-8-v;
++		vmmc-supply = <&sd_vmmc>;
++		vqmmc-supply = <&sd_vqmmc>;
++	};
++	emmc: mmc@d4281000 {
++		compatible = "mrvl,pxav3-mmc";
++		reg = <0xd4281000 0x120>;
++		interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&emmc_clock>;
++		clock-names = "io";
++		bus-width = <8>;
++		max-frequency = <26000000>;
++		non-removable;
++		no-sd;
++		no-sdio;
++		no-1-8-v;
++		mrvl,clk-delay-cycles = <15>;
++	};
++	pmic_clock: pmic-clock {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <33000000>;
++	};
++	pmic_i2c: i2c@d4037000 {
++		compatible = "mrvl,mmp-twsi";
++		reg = <0xd4037000 0x60>;
++		interrupts = <GIC_SPI 54 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&pmic_clock>;
++		mrvl,i2c-polling;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		pm805: codec@38 { compatible = "samsung,t110-pm805-audio"; reg = <0x38>; };
++
++		pmic_monitor: monitor@30 { compatible = "samsung,t110-pm822-monitor"; reg = <0x30>; interrupts = <GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>; wakeup-source; };
++		touch_ldo: regulator@31 {
++			compatible = "samsung,t110-pm822-touch-ldo1";
++			reg = <0x31>;
++			regulator-name = "v_tsp_2v8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-boot-on;
++			regulator-always-on;
++
++            bridge_io: bridge-io-regulator {
++                regulator-name = "v_lvds_1v8";
++                regulator-min-microvolt = <1800000>;
++                regulator-max-microvolt = <1800000>;
++                regulator-boot-on;
++            };
++            bridge_core: bridge-core-regulator {
++                regulator-name = "v_lvds_1v2";
++                regulator-min-microvolt = <1200000>;
++                regulator-max-microvolt = <1200000>;
++                regulator-boot-on;
++            };
++			sd_vmmc: sd-card-regulator {
++				regulator-name = "v_sd_3v3";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++			sd_vqmmc: sd-io-regulator {
++				regulator-name = "v_mmc_3v3";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++gps_ldo: gps-regulator {
++                regulator-name="v_gps_1v8";
++                regulator-min-microvolt=<1800000>;
++                regulator-max-microvolt=<1800000>;
++                regulator-boot-on;
++                regulator-always-on;
++            };
++sensor_ldo: sensor-regulator {
++                regulator-name = "v_sensor_2v8";
++                regulator-min-microvolt = <2800000>;
++                regulator-max-microvolt = <2800000>;
++                regulator-boot-on;
++                regulator-always-on;
++            };
++wifi_ldo: wifi-regulator {
++				regulator-name = "v_wib_3v3";
++				regulator-min-microvolt = <3300000>;
++				regulator-max-microvolt = <3300000>;
++			};
++		};
++	};
++	lcd@d420b000 {
++		compatible = "samsung,t110-lcd-handoff";
++		reg = <0xd420b000 0x200>;
++		interrupts = <GIC_SPI 41 IRQ_TYPE_LEVEL_HIGH>;
++	};
++	gc_power: gpu-power@d42828cc {
++		compatible = "samsung,t110-gpu-power";
++		reg = <0xd42828cc 4>, <0xd42828d8 4>, <0xd42828dc 4>, <0xd42828f0 4>;
++		#power-domain-cells = <0>;
++		#clock-cells = <0>;
++	};
++	gc_gpu: gpu@c0400000 {
++		compatible = "vivante,gc";
++		reg = <0xc0400000 0x2000>;
++		interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&gc_power>;
++		clock-names = "core";
++		samsung,t110-gpu-scaling;
++		#cooling-cells = <2>;
++		power-domains = <&gc_power>;
++	};
++	audio_sram: sram@d1004000 {
++		compatible = "mmio-sram";
++		reg = <0xd1004000 0xaa00>;
++	};
++	audio_dma: dma-controller@d42a0800 {
++		compatible = "marvell,pxa910-squ";
++		reg = <0xd42a0800 0x100>;
++		interrupts = <GIC_SPI 46 IRQ_TYPE_LEVEL_HIGH>;
++		#dma-cells = <1>;
++		asram = <&audio_sram>;
++	};
++	audio@d42a0c00 {
++		compatible = "samsung,t110-audio";
++		reg = <0xd42a0c00 0x90>, <0xd4015020 4>, <0xd4050044 4>, <0xd428281c 4>;
++		codec = <&pm805>;
++		asram = <&audio_sram>;
++		dmas = <&audio_dma 0>, <&audio_dma 1>;
++		dma-names = "tx", "rx";
++	};
++	/* 1 GiB verified from TWRP's physical RAM banks. */
++	memory@0 { device_type = "memory"; reg = <0 0x40000000>; };
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++		obm@0 { reg = <0 0x00100000>; no-map; };
++		/* Preserve all vendor carveouts during bring-up. */
++		cp-pm@6000000 { reg = <0x06000000 0x02100000>; no-map; };
++		diagnostics@8100000 { reg = <0x08100000 0x00f00000>; no-map; };
++		ion@9000000 { reg = <0x09000000 0x05000000>; no-map; };
++		framebuffer@17000000 { reg = <0x17000000 0x00800000>; no-map; };
++		gpu@2c000000 { reg = <0x2c000000 0x04000000>; no-map; };
++	};
++	cpus {
++		enable-method = "marvell,pxa986-smp";
++		#address-cells = <1>;
++		#size-cells = <0>;
++		cpu0: cpu@0 { #cooling-cells = <2>; device_type = "cpu"; compatible = "arm,cortex-a9"; reg = <0>; };
++		cpu@1 { device_type = "cpu"; compatible = "arm,cortex-a9"; reg = <1>; };
++	};
++	gic: interrupt-controller@d1dff000 {
++		compatible = "arm,cortex-a9-gic";
++		#interrupt-cells = <3>;
++		#address-cells = <0>;
++		interrupt-controller;
++		reg = <0xd1dff000 0x1000>, <0xd1dfe100 0x100>;
++	};
++	l2-cache@d1dfb000 {
++		compatible = "arm,pl310-cache";
++		reg = <0xd1dfb000 0x1000>;
++		cache-unified;
++		cache-level = <2>;
++		arm,data-latency = <2 1 1>;
++		arm,tag-latency = <2 1 1>;
++	};
++	timer@d1dfe600 {
++		compatible = "arm,cortex-a9-twd-timer";
++		reg = <0xd1dfe600 0x20>;
++		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_EDGE_RISING)>;
++	};
++	timer@d4014000 {
++		compatible = "mrvl,mmp-timer";
++		reg = <0xd4014000 0x100>;
++		interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;
++	};
++	usb@d4208000 {
++		compatible = "marvell,pxa986-usb";
++		reg = <0xd4208000 0x1000>, <0xd4207000 0x200>, <0xd428285c 0x4>;
++		reg-names = "controller", "phy", "clock";
++		interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
++		dr_mode = "peripheral";
++	};
++};
+diff --git a/arch/arm/configs/goyawifi_defconfig b/arch/arm/configs/goyawifi_defconfig
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/configs/goyawifi_defconfig
+@@ -0,0 +1,310 @@
++CONFIG_LOCALVERSION="-goyawifi"
++# CONFIG_LOCALVERSION_AUTO is not set
++CONFIG_KERNEL_XZ=y
++CONFIG_SYSVIPC=y
++CONFIG_POSIX_MQUEUE=y
++# CONFIG_CROSS_MEMORY_ATTACH is not set
++CONFIG_NO_HZ_IDLE=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_BPF_SYSCALL=y
++CONFIG_BPF_JIT=y
++CONFIG_BPF_LSM=y
++CONFIG_PSI=y
++CONFIG_IKCONFIG=y
++CONFIG_IKCONFIG_PROC=y
++# CONFIG_SCHED_CACHE is not set
++CONFIG_CGROUPS=y
++CONFIG_MEMCG=y
++CONFIG_CGROUP_SCHED=y
++CONFIG_CGROUP_PIDS=y
++CONFIG_CGROUP_FREEZER=y
++CONFIG_CPUSETS=y
++CONFIG_CGROUP_CPUACCT=y
++CONFIG_NAMESPACES=y
++CONFIG_USER_NS=y
++CONFIG_CHECKPOINT_RESTORE=y
++CONFIG_BLK_DEV_INITRD=y
++# CONFIG_RD_BZIP2 is not set
++# CONFIG_RD_LZMA is not set
++# CONFIG_RD_LZO is not set
++# CONFIG_INITRAMFS_PRESERVE_MTIME is not set
++CONFIG_EXPERT=y
++# CONFIG_UID16 is not set
++# CONFIG_FHANDLE is not set
++# CONFIG_AIO is not set
++# CONFIG_IO_URING is not set
++# CONFIG_ADVISE_SYSCALLS is not set
++# CONFIG_MEMBARRIER is not set
++# CONFIG_RSEQ is not set
++# CONFIG_CACHESTAT_SYSCALL is not set
++CONFIG_KALLSYMS_ALL=y
++CONFIG_PERF_EVENTS=y
++# CONFIG_ARCH_MULTIPLATFORM is not set
++CONFIG_ARCH_MMP=y
++CONFIG_MACH_PXA98X_DT=y
++CONFIG_T110_INPUT_POWER=y
++CONFIG_T110_MONITOR=y
++CONFIG_T110_CPUFREQ=y
++CONFIG_T110_GPU_POWER=y
++CONFIG_T110_CAMERA_CLK=m
++# CONFIG_HARDEN_BRANCH_PREDICTOR is not set
++# CONFIG_HARDEN_BRANCH_HISTORY is not set
++# CONFIG_ARM_ERRATA_643719 is not set
++CONFIG_ARM_ERRATA_754322=y
++CONFIG_SMP=y
++# CONFIG_ARM_CPU_TOPOLOGY is not set
++CONFIG_NR_CPUS=2
++# CONFIG_ARM_PATCH_IDIV is not set
++CONFIG_HIGHMEM=y
++# CONFIG_HIGHPTE is not set
++# CONFIG_ARM_PAN is not set
++CONFIG_ATAGS=y
++CONFIG_ARM_APPENDED_DTB=y
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
++CONFIG_VFP=y
++CONFIG_NEON=y
++CONFIG_PM_DEBUG=y
++CONFIG_KPROBES=y
++# CONFIG_STACKPROTECTOR is not set
++# CONFIG_VMAP_STACK is not set
++# CONFIG_STRICT_KERNEL_RWX is not set
++CONFIG_MODULES=y
++CONFIG_MODULE_UNLOAD=y
++CONFIG_MODULE_COMPRESS=y
++CONFIG_MODULE_COMPRESS_ZSTD=y
++CONFIG_MODULE_DECOMPRESS=y
++# CONFIG_BLOCK_LEGACY_AUTOLOAD is not set
++# CONFIG_BLK_DEV_WRITE_MOUNTED is not set
++CONFIG_PARTITION_ADVANCED=y
++# CONFIG_MQ_IOSCHED_DEADLINE is not set
++# CONFIG_MQ_IOSCHED_KYBER is not set
++# CONFIG_IOSCHED_BFQ is not set
++CONFIG_BINFMT_MISC=m
++# CONFIG_COREDUMP is not set
++# CONFIG_SLAB_MERGE_DEFAULT is not set
++# CONFIG_COMPAT_BRK is not set
++# CONFIG_COMPACTION is not set
++CONFIG_NET=y
++CONFIG_PACKET=y
++CONFIG_UNIX=y
++# CONFIG_AF_UNIX_OOB is not set
++CONFIG_INET=y
++CONFIG_IP_ADVANCED_ROUTER=y
++CONFIG_IP_MULTIPLE_TABLES=y
++CONFIG_SYN_COOKIES=y
++CONFIG_IPV6_SIT=y
++CONFIG_IPV6_MULTIPLE_TABLES=y
++CONFIG_NETFILTER=y
++CONFIG_NF_CONNTRACK=m
++CONFIG_NF_CONNTRACK_MARK=y
++CONFIG_NF_TABLES=m
++CONFIG_NF_TABLES_INET=y
++CONFIG_NFT_CT=m
++CONFIG_NFT_LOG=m
++CONFIG_NFT_LIMIT=m
++CONFIG_NFT_MASQ=m
++CONFIG_NFT_NAT=m
++CONFIG_NFT_REJECT=m
++CONFIG_NETFILTER_XTABLES_LEGACY=y
++CONFIG_NFT_FIB_IPV4=m
++CONFIG_IP_NF_IPTABLES=m
++CONFIG_IP_NF_TARGET_REJECT=m
++CONFIG_IP_NF_NAT=m
++CONFIG_NFT_FIB_IPV6=m
++CONFIG_IP6_NF_IPTABLES=m
++CONFIG_IP6_NF_TARGET_REJECT=m
++CONFIG_IP6_NF_NAT=m
++# CONFIG_PCPU_DEV_REFCNT is not set
++# CONFIG_RPS is not set
++# CONFIG_BQL is not set
++CONFIG_BT=m
++CONFIG_BT_RFCOMM=m
++CONFIG_BT_RFCOMM_TTY=y
++CONFIG_BT_BNEP=m
++CONFIG_BT_BNEP_MC_FILTER=y
++CONFIG_BT_BNEP_PROTO_FILTER=y
++CONFIG_BT_MRVL=m
++CONFIG_BT_MRVL_SDIO=m
++CONFIG_CFG80211=m
++# CONFIG_CFG80211_DEFAULT_PS is not set
++CONFIG_RFKILL=m
++# CONFIG_ETHTOOL_NETLINK is not set
++CONFIG_UEVENT_HELPER=y
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_DRIVER_DEFERRED_PROBE_TIMEOUT=0
++# CONFIG_STANDALONE is not set
++# CONFIG_PREVENT_FIRMWARE_BUILD is not set
++CONFIG_FW_LOADER_COMPRESS=y
++CONFIG_FW_LOADER_COMPRESS_ZSTD=y
++# CONFIG_ALLOW_DEV_COREDUMP is not set
++CONFIG_ZRAM=y
++CONFIG_ZRAM_BACKEND_LZ4=y
++CONFIG_ZRAM_BACKEND_LZ4HC=y
++CONFIG_ZRAM_BACKEND_ZSTD=y
++CONFIG_ZRAM_BACKEND_DEFLATE=y
++CONFIG_ZRAM_BACKEND_842=y
++CONFIG_ZRAM_BACKEND_LZO=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_SRAM=y
++CONFIG_SCSI=m
++CONFIG_BLK_DEV_SR=m
++CONFIG_MD=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_CRYPT=m
++CONFIG_NETDEVICES=y
++CONFIG_WIREGUARD=m
++CONFIG_USB_RTL8152=m
++CONFIG_USB_USBNET=m
++CONFIG_USB_NET_RNDIS_HOST=m
++CONFIG_MWIFIEX=m
++CONFIG_MWIFIEX_SDIO=m
++CONFIG_INPUT_EVDEV=m
++CONFIG_KEYBOARD_GPIO=y
++# CONFIG_INPUT_MOUSE is not set
++CONFIG_INPUT_TOUCHSCREEN=y
++CONFIG_TOUCHSCREEN_ZINITIX=y
++# CONFIG_CONSOLE_TRANSLATIONS is not set
++# CONFIG_LEGACY_PTYS is not set
++# CONFIG_LEGACY_TIOCSTI is not set
++# CONFIG_LDISC_AUTOLOAD is not set
++CONFIG_SERIAL_8250=y
++CONFIG_SERIAL_OF_PLATFORM=y
++CONFIG_NULL_TTY=m
++# CONFIG_HW_RANDOM is not set
++# CONFIG_DEVMEM is not set
++# CONFIG_DEVPORT is not set
++CONFIG_I2C_CHARDEV=y
++# CONFIG_I2C_HELPER_AUTO is not set
++CONFIG_I2C_GPIO=y
++CONFIG_I2C_PXA=y
++# CONFIG_PTP_1588_CLOCK is not set
++# CONFIG_GPIO_CDEV is not set
++CONFIG_T110_CHARGER=m
++CONFIG_CPU_THERMAL=y
++CONFIG_THERMAL_EMULATION=y
++CONFIG_MEDIA_SUPPORT=y
++CONFIG_MEDIA_SUPPORT_FILTER=y
++# CONFIG_MEDIA_SUBDRV_AUTOSELECT is not set
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_PLATFORM_SUPPORT=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_VIDEO_MMP_CAMERA=m
++CONFIG_VIDEO_SR200PC20M_T110=m
++CONFIG_DRM=y
++CONFIG_DRM_ETNAVIV=m
++CONFIG_DRM_ETNAVIV_T110=y
++CONFIG_DRM_T110=m
++CONFIG_DRM_UDL=m
++CONFIG_FB=y
++CONFIG_FB_SIMPLE=y
++CONFIG_BACKLIGHT_CLASS_DEVICE=m
++CONFIG_BACKLIGHT_T110_VX5B3D=m
++CONFIG_SOUND=y
++CONFIG_SND=m
++CONFIG_SND_T110_AUDIO=m
++CONFIG_SND_USB_AUDIO=m
++CONFIG_SND_USB_AUDIO_MIDI_V2=y
++# CONFIG_HID_SUPPORT is not set
++CONFIG_USB=m
++CONFIG_USB_STORAGE=m
++CONFIG_USB_UAS=m
++CONFIG_USB_CHIPIDEA=y
++CONFIG_USB_CHIPIDEA_UDC=y
++# CONFIG_USB_CHIPIDEA_MSM is not set
++# CONFIG_USB_CHIPIDEA_NPCM is not set
++# CONFIG_USB_CHIPIDEA_IMX is not set
++# CONFIG_USB_CHIPIDEA_GENERIC is not set
++# CONFIG_USB_CHIPIDEA_TEGRA is not set
++CONFIG_USB_SERIAL=m
++CONFIG_USB_SERIAL_SIMPLE=m
++CONFIG_USB_SERIAL_CP210X=m
++CONFIG_USB_GADGET=y
++CONFIG_USB_CONFIGFS=m
++CONFIG_USB_CONFIGFS_ACM=y
++CONFIG_USB_CONFIGFS_NCM=y
++CONFIG_USB_CONFIGFS_ECM=y
++CONFIG_USB_CONFIGFS_RNDIS=y
++CONFIG_USB_CONFIGFS_MASS_STORAGE=y
++CONFIG_USB_CONFIGFS_F_FS=y
++CONFIG_MMC=y
++# CONFIG_PWRSEQ_EMMC is not set
++CONFIG_MMC_BLOCK_MINORS=32
++CONFIG_MMC_SDHCI=y
++CONFIG_MMC_SDHCI_PLTFM=y
++CONFIG_MMC_SDHCI_PXAV3=y
++CONFIG_RTC_CLASS=y
++# CONFIG_RTC_SYSTOHC is not set
++CONFIG_DMADEVICES=y
++CONFIG_MMP_TDMA=m
++CONFIG_UDMABUF=y
++# CONFIG_VIRTIO_MENU is not set
++# CONFIG_VHOST_MENU is not set
++# CONFIG_IOMMU_SUPPORT is not set
++CONFIG_PM_DEVFREQ=y
++CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
++CONFIG_DEVFREQ_GOV_PERFORMANCE=y
++CONFIG_DEVFREQ_GOV_POWERSAVE=y
++CONFIG_DEVFREQ_GOV_USERSPACE=y
++CONFIG_IIO=y
++CONFIG_BMC150_ACCEL=y
++CONFIG_GENERIC_PHY=y
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_POSIX_ACL=y
++CONFIG_EXT4_FS_SECURITY=y
++# CONFIG_DNOTIFY is not set
++CONFIG_FUSE_FS=m
++CONFIG_OVERLAY_FS=m
++CONFIG_VFAT_FS=y
++CONFIG_FAT_DEFAULT_IOCHARSET="utf8"
++CONFIG_EXFAT_FS=y
++CONFIG_TMPFS_POSIX_ACL=y
++CONFIG_CONFIGFS_FS=y
++# CONFIG_MISC_FILESYSTEMS is not set
++# CONFIG_NETWORK_FILESYSTEMS is not set
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ASCII=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_NLS_UTF8=y
++CONFIG_ENCRYPTED_KEYS=m
++CONFIG_KEY_DH_OPERATIONS=y
++CONFIG_SECURITY=y
++CONFIG_SECURITYFS=y
++CONFIG_SECURITY_NETWORK=y
++CONFIG_SECURITY_PATH=y
++CONFIG_CRYPTO_AES=y
++CONFIG_CRYPTO_DES=m
++CONFIG_CRYPTO_CBC=y
++CONFIG_CRYPTO_XTS=y
++CONFIG_CRYPTO_CMAC=m
++CONFIG_CRYPTO_MD4=m
++CONFIG_CRYPTO_MD5=y
++CONFIG_CRYPTO_SHA1=y
++CONFIG_CRYPTO_SHA512=y
++CONFIG_CRYPTO_LZO=y
++CONFIG_CRYPTO_ZSTD=y
++CONFIG_CRYPTO_USER_API_HASH=m
++CONFIG_CRYPTO_USER_API_SKCIPHER=m
++CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
++# CONFIG_CRC_OPTIMIZATIONS is not set
++CONFIG_CMA_SIZE_MBYTES=32
++CONFIG_FONTS=y
++CONFIG_FONT_8x16=y
++CONFIG_FONT_TER16x32=y
++CONFIG_PRINTK_TIME=y
++# CONFIG_SYMBOLIC_ERRNAME is not set
++# CONFIG_DEBUG_BUGVERBOSE is not set
++# CONFIG_DEBUG_MISC is not set
++CONFIG_DEBUG_INFO_DWARF5=y
++CONFIG_DEBUG_INFO_BTF=y
++# CONFIG_SECTION_MISMATCH_WARN_ONLY is not set
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_DEBUG_FS=y
++# CONFIG_SLUB_DEBUG is not set
++# CONFIG_RCU_TRACE is not set
++CONFIG_DEBUG_USER=y
++# CONFIG_RUNTIME_TESTING_MENU is not set
+diff --git a/arch/arm/kernel/devtree.c b/arch/arm/kernel/devtree.c
+--- a/arch/arm/kernel/devtree.c
++++ b/arch/arm/kernel/devtree.c
+@@ -12,6 +12,9 @@
+ #include <linux/memblock.h>
+ #include <linux/of.h>
+ #include <linux/of_fdt.h>
++#ifdef CONFIG_MACH_PXA98X_DT
++#include <linux/t110-board.h>
++#endif
+ #include <linux/of_irq.h>
+ #include <linux/smp.h>
+ 
+@@ -200,6 +203,11 @@
+ 
+ 	mdesc_best = &__mach_desc_GENERIC_DT;
+ 
++#ifdef CONFIG_MACH_PXA98X_DT
++	if (dt_virt)
++		pxa98x_fixup_boot_fdt(dt_virt);
++#endif
++
+ 	if (!dt_virt || !early_init_dt_verify(dt_virt, __pa(dt_virt)))
+ 		return NULL;
+ 
+diff --git a/arch/arm/kernel/hw_breakpoint.c b/arch/arm/kernel/hw_breakpoint.c
+--- a/arch/arm/kernel/hw_breakpoint.c
++++ b/arch/arm/kernel/hw_breakpoint.c
+@@ -13,6 +13,7 @@
+ #define pr_fmt(fmt) "hw-breakpoint: " fmt
+ 
+ #include <linux/errno.h>
++#include <linux/of.h>
+ #include <linux/hardirq.h>
+ #include <linux/perf_event.h>
+ #include <linux/hw_breakpoint.h>
+@@ -1176,6 +1177,15 @@
+ {
+ 	int ret;
+ 
++	/* goyawifi CP14: the SM-T110 PXA986 A0 traps on DBGOSLSR before
++	 * the generic undefined-instruction hook is registered. Keep the
++	 * software perf/BPF facilities, but expose zero hardware slots.
++	 */
++	if (of_machine_is_compatible("samsung,goyawifi")) {
++		pr_info("SM-T110 CP14 debug access unavailable; hardware breakpoints disabled\n");
++		return 0;
++	}
++
+ 	debug_arch = get_debug_arch();
+ 
+ 	if (!debug_arch_supported()) {
+diff --git a/arch/arm/kernel/smp_twd.c b/arch/arm/kernel/smp_twd.c
+--- a/arch/arm/kernel/smp_twd.c
++++ b/arch/arm/kernel/smp_twd.c
+@@ -6,6 +6,7 @@
+  *  All Rights Reserved
+  */
+ #include <linux/init.h>
++#include <linux/cpufreq.h>
+ #include <linux/kernel.h>
+ #include <linux/clk.h>
+ #include <linux/cpu.h>
+@@ -128,8 +129,31 @@
+ 	.notifier_call = twd_rate_change,
+ };
+ 
++#ifdef CONFIG_T110_CPUFREQ
++/* Temporary board hook until PXA986 CPU/PERIPHCLK have a CCF provider.
++ * This board keeps PERIPHCLK=CPU/8 at every supported operating point.
++ * POSTCHANGE executes outside the clock transition's stop_machine section.
++ */
++static int t110_twd_cpufreq(struct notifier_block *nb, unsigned long event,
++                           void *data)
++{
++ struct cpufreq_freqs *f = data;
++ unsigned long rate = (unsigned long)f->new * 1000 / 8;
++ if (event == CPUFREQ_POSTCHANGE)
++  on_each_cpu(twd_update_frequency, &rate, 1);
++ return NOTIFY_OK;
++}
++static struct notifier_block t110_twd_nb = {
++ .notifier_call = t110_twd_cpufreq,
++};
++#endif
++
+ static int twd_clk_init(void)
+ {
++#ifdef CONFIG_T110_CPUFREQ
++ if (twd_evt && IS_ERR(twd_clk) && of_machine_is_compatible("samsung,goyawifi"))
++  return cpufreq_register_notifier(&t110_twd_nb, CPUFREQ_TRANSITION_NOTIFIER);
++#endif
+ 	if (twd_evt && raw_cpu_ptr(twd_evt) && !IS_ERR(twd_clk))
+ 		return clk_notifier_register(twd_clk, &twd_clk_nb);
+ 
+diff --git a/arch/arm/mach-mmp/Kconfig b/arch/arm/mach-mmp/Kconfig
+--- a/arch/arm/mach-mmp/Kconfig
++++ b/arch/arm/mach-mmp/Kconfig
+@@ -10,6 +10,16 @@
+ 	  Support for Marvell's PXA168/PXA910(MMP), MMP2, and MMP3 processor lines.
+ 
+ if ARCH_MMP
++
++config MACH_PXA98X_DT
++	bool "Experimental Samsung SM-T110 PXA986 boot probe"
++	depends on ARCH_MULTI_V7
++	select ARM_GIC
++	select CACHE_L2X0
++	select HAVE_SMP
++	select HAVE_ARM_SCU
++	select HAVE_ARM_TWD
++
+ 
+ menu "Marvell PXA168/910/MMP2 Implementations"
+ 
+@@ -77,3 +87,31 @@
+ 	  Select code specific to MMP2. MMP2 is ARMv7 compatible.
+ 
+ endif
++
++config T110_INPUT_POWER
++	bool "SM-T110 touch and bridge regulators"
++	depends on MACH_PXA98X_DT && I2C
++	select REGULATOR
++	select REGMAP_I2C
++
++config T110_MONITOR
++	bool "SM-T110 battery, thermal and onkey monitoring"
++	depends on MACH_PXA98X_DT && I2C
++	select REGMAP_I2C
++	select POWER_SUPPLY
++	select HWMON
++	select THERMAL
++	select THERMAL_OF
++
++config T110_CPUFREQ
++	bool "SM-T110 CPU and DDR frequency/voltage scaling"
++	depends on MACH_PXA98X_DT && CPU_FREQ && SMP && HAVE_ARM_TWD
++
++config T110_GPU_POWER
++	bool "SM-T110 experimental GPU power domain"
++	depends on PM && OF && T110_CPUFREQ
++	select PM_GENERIC_DOMAINS
++
++config T110_CAMERA_CLK
++	tristate "SM-T110 camera clock gates"
++	depends on MACH_PXA98X_DT
+diff --git a/arch/arm/mach-mmp/Makefile b/arch/arm/mach-mmp/Makefile
+--- a/arch/arm/mach-mmp/Makefile
++++ b/arch/arm/mach-mmp/Makefile
+@@ -3,6 +3,7 @@
+ # Makefile for Marvell's PXA168 processors line
+ #
+ obj-y				+= common.o time.o
++obj-$(CONFIG_MACH_PXA98X_DT) += pxa98x-board.o
+ 
+ ifeq ($(CONFIG_SMP),y)
+ obj-$(CONFIG_MACH_MMP3_DT)	+= platsmp.o
+@@ -12,3 +13,27 @@
+ obj-$(CONFIG_MACH_MMP_DT)	+= mmp-dt.o
+ obj-$(CONFIG_MACH_MMP2_DT)	+= mmp2-dt.o
+ obj-$(CONFIG_MACH_MMP3_DT)	+= mmp3.o
++
++obj-$(CONFIG_MACH_PXA98X_DT) += pxa98x-usb.o
++
++ifeq ($(CONFIG_SMP),y)
++obj-$(CONFIG_MACH_PXA98X_DT) += pxa98x-smp.o
++endif
++
++obj-$(CONFIG_MACH_PXA98X_DT) += pxa98x-display.o
++
++obj-$(CONFIG_T110_INPUT_POWER) += pxa98x-pm822-touch.o
++
++obj-$(CONFIG_T110_MONITOR) += pxa98x-pm822-monitor.o pxa98x-thermal.o
++
++obj-$(CONFIG_T110_CPUFREQ) += pxa98x-cpufreq.o
++
++obj-$(CONFIG_T110_GPU_POWER) += pxa98x-gpu-power.o
++
++obj-$(CONFIG_MACH_PXA98X_DT) += t110-sleep.o
++
++obj-$(CONFIG_MACH_PXA98X_DT) += pxa98x-gps.o
++
++obj-$(CONFIG_T110_CAMERA_CLK) += t110-camera-clock.o
++
++obj-$(CONFIG_T110_CAMERA_CLK) += t110-vpu-probe.o
+diff --git a/arch/arm/mach-mmp/pxa98x-board.c b/arch/arm/mach-mmp/pxa98x-board.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-board.c
+@@ -0,0 +1,313 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Samsung Galaxy Tab 3 Lite SM-T110 platform support. Based on Marvell PXA988 register sequences. */
++#include <linux/console.h>
++#include <linux/kernel.h>
++#include <linux/delay.h>
++#include <linux/init.h>
++#include <linux/libfdt.h>
++#include <linux/t110-board.h>
++#include <linux/sizes.h>
++#include <linux/of_fdt.h>
++#include <linux/io.h>
++#include <linux/irqchip.h>
++#include <linux/clocksource.h>
++#include <linux/clk-provider.h>
++#include <linux/reboot.h>
++#include <asm/mach/arch.h>
++#include <asm/mach/map.h>
++#include <asm/barrier.h>
++#include "common.h"
++#include "addr-map.h"
++#include "t110-ecc.h"
++
++#define LOG_VIRT 0xfe800000UL
++#define LOG_PHYS 0x08100000UL
++#define LOG_SIZE 0x40000
++#define DATA_SIZE 232980
++#define ECC_BLOCKS 1821
++#define LOG ((void __iomem *)LOG_VIRT)
++
++/* No allocation or timer dependency: usable from map_io onward. */
++static void t110_ecc(const void __iomem *src, unsigned int len,
++		     void __iomem *dst)
++{
++	u8 par[16] = {0};
++	unsigned int i, j, fb, n;
++	for (i = 0; i < len; i++) {
++		fb = t110_index[readb(src + i) ^ par[0]];
++		if (fb != 255)
++			for (j = 1; j < 16; j++) {
++				n = fb + t110_gen[16 - j];
++				if (n >= 255) n -= 255;
++				par[j] ^= t110_alpha[n];
++			}
++		for (j = 0; j < 15; j++) par[j] = par[j + 1];
++		n = fb + t110_gen[0];
++		if (n >= 255) n -= 255;
++		par[15] = fb != 255 ? t110_alpha[n] : 0;
++	}
++	for (j = 0; j < 16; j++) writeb(par[j], dst + j);
++}
++
++static void t110_ram_write(struct console *con, const char *s, unsigned int n)
++{
++	u32 start = readl(LOG + 4), size = readl(LOG + 8);
++	unsigned int take, first, last, i, length;
++	while (n) {
++		take = min_t(unsigned int, n, DATA_SIZE - start);
++		memcpy_toio(LOG + 12 + start, s, take);
++		first = start / 128;
++		last = (start + take - 1) / 128;
++		for (i = first; i <= last; i++) {
++			length = min_t(unsigned int, 128, DATA_SIZE - i * 128);
++			t110_ecc(LOG + 12 + i * 128, length,
++				 LOG + 12 + DATA_SIZE + i * 16);
++		}
++		start = (start + take) % DATA_SIZE;
++		size = min_t(u32, DATA_SIZE, size + take);
++		writel(start, LOG + 4);
++		writel(size, LOG + 8);
++		t110_ecc(LOG, 12, LOG + 12 + DATA_SIZE + ECC_BLOCKS * 16);
++		dsb(sy);
++		s += take;
++		n -= take;
++	}
++}
++
++static struct console t110_console = {
++	.name = "t110ram",
++	.write = t110_ram_write,
++	.flags = CON_PRINTBUFFER | CON_ENABLED | CON_BOOT,
++	.index = -1,
++};
++
++static struct map_desc t110_log_map __initdata = {
++	.virtual = LOG_VIRT,
++	.pfn = __phys_to_pfn(LOG_PHYS),
++	.length = LOG_SIZE,
++	.type = MT_DEVICE,
++};
++
++static void __init t110_map_io(void)
++{
++	mmp_map_io();
++	iotable_init(&t110_log_map, 1);
++	memset_io(LOG, 0, LOG_SIZE);
++	writel(0x43474244, LOG);
++	t110_ecc(LOG, 12, LOG + 12 + DATA_SIZE + ECC_BLOCKS * 16);
++	static const char marker[] = "goyawifi: map_io reached\n";
++	t110_ram_write(NULL, marker, sizeof(marker) - 1);
++	register_console(&t110_console);
++	pr_emerg("goyawifi: compatible early RAM console registered\n");
++}
++
++static void __init t110_init_irq(void)
++{
++	/* In active mode sources go directly to the GIC, not the ICU output. */
++	writel(3, AXI_VIRT_BASE + 0x82114);
++	writel(3, AXI_VIRT_BASE + 0x82144);
++	irqchip_init();
++	pr_emerg("goyawifi: GIC initialized\n");
++}
++
++static void __init t110_init_time(void)
++{
++#ifdef CONFIG_MMC_SDHCI_PXAV3
++	/* Keep the shared SDH AXI clock/reset released; eMMC source PLL1/8. */
++	u32 sdh = readl(APMU_REG(0x0e0));
++	writel(readl(APMU_REG(0x54)) | 9, APMU_REG(0x54));
++	writel((sdh & ~0x7c0) | 0xf12, APMU_REG(0x0e0));
++	readl(APMU_REG(0x0e0));
++	udelay(20);
++	pr_info("T110_STORAGE_G: SDH0=%08x SDH2=%08x, source 52MHz\n",
++		readl(APMU_REG(0x54)), readl(APMU_REG(0x0e0)));
++#endif
++
++	/* Touch TWSI1 and GPIO APBC clocks, matching goyawifi vendor setup. */
++	writel(3, APBC_REG(0x008));
++	writel(2, APBC_REG(0x060));
++	udelay(10);
++	writel(3, APBC_REG(0x060));
++	udelay(10);
++	/* Preserve electrical settings; GPIO87/88 AF5 is CI2C2. */
++	writel((readl(APB_VIRT_BASE + 0x1e208) & ~7) | 5, APB_VIRT_BASE + 0x1e208);
++	writel((readl(APB_VIRT_BASE + 0x1e20c) & ~7) | 5, APB_VIRT_BASE + 0x1e20c);
++	writel(readl(APB_VIRT_BASE + 0x1e224) & ~7, APB_VIRT_BASE + 0x1e224);
++	/* Rear camera power GPIO14/15/79/80 and bit-bang I2C53/54. */
++	for (unsigned int off = 0x114; off <= 0x118; off += 4)
++		writel(readl(APB_VIRT_BASE + 0x1e000 + off)&~7,APB_VIRT_BASE + 0x1e000 + off);
++	for (unsigned int off = 0x1e8; off <= 0x1ec; off += 4)
++		writel(readl(APB_VIRT_BASE + 0x1e000 + off)&~7,APB_VIRT_BASE + 0x1e000 + off);
++	for (unsigned int off = 0x1b0; off <= 0x1b4; off += 4)
++		writel(readl(APB_VIRT_BASE + 0x1e000 + off)&~7,APB_VIRT_BASE + 0x1e000 + off);
++	/* GPIO77 CAM_MCLK AF1. */
++	writel((readl(APB_VIRT_BASE + 0x1e1e0)&~7)|1,APB_VIRT_BASE + 0x1e1e0);
++	/* GPS AP UART2: vendor APBC source1, 14.7456MHz. */
++	writel(0x17, APBC_REG(0x004));
++	udelay(10);
++	writel(0x13, APBC_REG(0x004));
++	/* RX/TX GPIO45/46 AF1, reset5/onoff52/clock89 AF0. */
++	for (unsigned int off = 0x190; off <= 0x194; off += 4)
++		writel((readl(APB_VIRT_BASE + 0x1e000 + off)&~7)|1,APB_VIRT_BASE + 0x1e000 + off);
++	writel(readl(APB_VIRT_BASE + 0x1e0f0)&~7,APB_VIRT_BASE + 0x1e0f0);
++	writel(readl(APB_VIRT_BASE + 0x1e1ac)&~7,APB_VIRT_BASE + 0x1e1ac);
++	writel(readl(APB_VIRT_BASE + 0x1e210)&~7,APB_VIRT_BASE + 0x1e210);
++	/* Dedicated accelerometer GPIO I2C5 and INT1; preserve pulls. */
++	for (unsigned int off = 0x168; off <= 0x16c; off += 4)
++		writel(readl(APB_VIRT_BASE + 0x1e000 + off) & ~7,
++		       APB_VIRT_BASE + 0x1e000 + off);
++	writel(readl(APB_VIRT_BASE + 0x1e104) & ~7, APB_VIRT_BASE + 0x1e104);
++	/* Physical keys: GPIO1, GPIO2 and GPIO13; keep existing pulls. */
++	writel(readl(APB_VIRT_BASE + 0x1e0e0) & ~7, APB_VIRT_BASE + 0x1e0e0);
++	writel(readl(APB_VIRT_BASE + 0x1e0e4) & ~7, APB_VIRT_BASE + 0x1e0e4);
++	writel(readl(APB_VIRT_BASE + 0x1e110) & ~7, APB_VIRT_BASE + 0x1e110);
++	pr_info("T110_INPUT_J: GPIO and touch TWSI1 clocks/pins configured\n");
++#ifdef CONFIG_T110_MONITOR
++	/* Vendor DROTS clock source 13MHz, release APBC reset. */
++	writel(3, APBC_REG(0x058));
++	udelay(10);
++#endif
++	/* PMIC I2C: vendor APBCP_PWRTWSI clock sequence, source 33 MHz. */
++	writel(2, APB_VIRT_BASE + 0x3b028);
++	udelay(10);
++	writel(3, APB_VIRT_BASE + 0x3b028);
++	udelay(10);
++
++	/* SDH2 Wi-Fi: PLL1/8, same shared MMC interrupt as eMMC. */
++	writel((readl(APMU_REG(0x58)) & ~0x7c0) | 0xf12, APMU_REG(0x58));
++	readl(APMU_REG(0x58));
++	udelay(20);
++	/* GPIO37..42 SDIO AF1; preserve bootloader drive and pulls. */
++	for (unsigned int off = 0x170; off <= 0x184; off += 4)
++		writel((readl(APB_VIRT_BASE + 0x1e000 + off) & ~7) | 1,
++		       APB_VIRT_BASE + 0x1e000 + off);
++	writel(readl(APB_VIRT_BASE + 0x1e1a8) & ~7, APB_VIRT_BASE + 0x1e1a8);
++	pr_info("T110_WIFI_O: SDH2 clock=%08x, SDIO AF1 and PDn GPIO51 configured\n",
++		readl(APMU_REG(0x58)));
++	/* SM-T110 board rev02: removable SDH1, PLL1/8=52MHz source.
++	 * APMU054 also owns the shared AXI gate and reset for all hosts:
++	 * retain bit3 and bit0; never pulse the shared reset here. */
++	writel((readl(APMU_REG(0x54)) & ~0x7c0) | 0xf1b, APMU_REG(0x54));
++	readl(APMU_REG(0x54));
++	udelay(20);
++	/* MMC1 DAT3..DAT0, CMD, CLK AF0; card detect is GPIO11 AF0. */
++	for (unsigned int off = 0x94; off <= 0xa8; off += 4)
++		writel(readl(APB_VIRT_BASE + 0x1e000 + off) & ~7,
++		       APB_VIRT_BASE + 0x1e000 + off);
++	writel(readl(APB_VIRT_BASE + 0x1e108) & ~7, APB_VIRT_BASE + 0x1e108);
++	/* Vendor pxa988_aib_mmc1_iodomain(3300000): 3.3V pad domain,
++	 * powerdown_n set, preserve all unrelated electrical controls. */
++	{
++		u32 sdpad;
++		writel(0xbaba, APBC_REG(0x050));
++		writel(0xeb10, APBC_REG(0x054));
++		sdpad = (readl(APB_VIRT_BASE + 0x1e81c) & ~0xc) | 1;
++		writel(0xbaba, APBC_REG(0x050));
++		writel(0xeb10, APBC_REG(0x054));
++		writel(sdpad, APB_VIRT_BASE + 0x1e81c);
++	}
++	pr_info("T110_MICROSD_AH: SDH1=%08x, GPIO11 CD and 3.3V pads\n",
++		readl(APMU_REG(0x54)));
++	of_clk_init(NULL);
++	/* Vendor APBC reset/clock sequence, FNCLKSEL=3 => 3.25 MHz. */
++	writel(5, APBC_REG(0x34));
++	writel(0x33, APBC_REG(0x34));
++	writel(0, APB_VIRT_BASE + 0x14000);
++	timer_probe();
++	pr_emerg("goyawifi: APB timer initialized\n");
++}
++
++static void t110_restart(enum reboot_mode mode, const char *cmd)
++{
++	void __iomem *wdt = APB_VIRT_BASE + 0x80000;
++	u32 count;
++	pr_emerg("T110_DISPLAY_D: watchdog restart cmd=%s\n", cmd ?: "normal");
++	/* Same recovery magic as vendor do_wdt_reset(). */
++	writel(cmd && !strcmp(cmd, "recovery") ? 0x7265636f : 0,
++	       APB_VIRT_BASE + 0x10014);
++	writel(readl(MPMU_REG(0x1020)) | 1, MPMU_REG(0x1020));
++	udelay(10);
++	writel(readl(MPMU_REG(0x20)) | 0xc, MPMU_REG(0x20));
++	udelay(10);
++	writel(7, MPMU_REG(0x200));
++	readl(MPMU_REG(0x200));
++	writel(3, MPMU_REG(0x200));
++	readl(MPMU_REG(0x200));
++	writel(0xbaba, wdt + 0x9c); writel(0xeb10, wdt + 0xa0);
++	writel(3, wdt + 0x64);
++	writel(readl(MPMU_REG(0x1020)) | 0x10, MPMU_REG(0x1020));
++	writel(0xbaba, wdt + 0x9c); writel(0xeb10, wdt + 0xa0);
++	writel(0, wdt + 0x70);
++	count = readl(wdt + 0x6c);
++	writel(0xbaba, wdt + 0x9c); writel(0xeb10, wdt + 0xa0);
++	writel((count + 0x20) & 0xffff, wdt + 0x68);
++	dsb(sy);
++	for (;;) cpu_relax();
++}
++
++/* The boot image packer carries an external initramfs in FDT tail space.
++ * ARM's decompressor may relocate that whole blob. Derive the handoff from
++ * r2's actual physical FDT address, then expose only the real DT size so
++ * generic initrd reservation does not overlap the FDT reservation. The
++ * packer leaves one page between DT and initrd for independent lifetimes.
++ * Run before early_init_dt_verify(): its CRC must not touch initramfs tail
++ * bytes beyond ARM's two-section fixed mapping of the FDT.
++ */
++extern unsigned int __atags_pointer;
++void __init pxa98x_fixup_boot_fdt(void *blob)
++{
++	const fdt32_t *size_prop;
++	u32 total, size, dt_size, start, end;
++	u64 end64;
++	int chosen, len;
++
++	if (fdt_check_header(blob) ||
++	    fdt_node_check_compatible(blob, 0, "samsung,goyawifi"))
++		return;
++	chosen = fdt_path_offset(blob, "/chosen");
++	if (chosen < 0)
++		return;
++	size_prop = fdt_getprop(blob, chosen, "samsung,goyawifi-initrd-size", &len);
++	if (!size_prop || len != sizeof(*size_prop))
++		return;
++	size = fdt32_to_cpu(*size_prop);
++	total = fdt_totalsize(blob);
++	if (!size || size > SZ_16M || total < size + SZ_4K + sizeof(struct fdt_header))
++		return;
++	dt_size = total - size - SZ_4K;
++	if (fdt_off_dt_strings(blob) + fdt_size_dt_strings(blob) > dt_size)
++		return;
++	end64 = (u64)__atags_pointer + total;
++	if (end64 > U32_MAX)
++		return;
++	end = end64;
++	start = end - size;
++	if (fdt_setprop_inplace_u32(blob, chosen, "linux,initrd-start", start) ||
++	    fdt_setprop_inplace_u32(blob, chosen, "linux,initrd-end", end))
++		return;
++	fdt_set_totalsize(blob, dt_size);
++
++	pr_info("goyawifi: external initramfs %08x..%08x, FDT at %08x\n",
++		start, end, __atags_pointer);
++}
++
++static void __init goyawifi_fixup_initrd(void)
++{
++	/* r2 holds the physical FDT address; the early mapping is fixed virtual. */
++	initial_boot_params_pa = __atags_pointer;
++}
++
++static const char *const t110_compat[] __initconst = {
++	"samsung,goyawifi", NULL,
++};
++
++DT_MACHINE_START(GOYAWIFI, "Samsung Galaxy Tab 3 Lite SM-T110")
++	.dt_fixup = goyawifi_fixup_initrd,
++	.map_io = t110_map_io,
++	.init_irq = t110_init_irq,
++	.init_time = t110_init_time,
++	.restart = t110_restart,
++	.l2c_aux_val = 0x30800000,
++	.l2c_aux_mask = 0xce7fffff,
++	.dt_compat = t110_compat,
++MACHINE_END
+diff --git a/arch/arm/mach-mmp/pxa98x-cpufreq.c b/arch/arm/mach-mmp/pxa98x-cpufreq.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-cpufreq.c
+@@ -0,0 +1,552 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 PXA986 clock bring-up, derived from Marvell's PXA988 vendor driver. */
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/regmap.h>
++#include <linux/reboot.h>
++#include <linux/cpufreq.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/mutex.h>
++#include <linux/moduleparam.h>
++#include <linux/platform_device.h>
++#include <linux/devfreq.h>
++#include <linux/pm_opp.h>
++#include <linux/pm_qos.h>
++#include <linux/workqueue.h>
++#include <linux/ktime.h>
++#include <linux/stop_machine.h>
++#include <linux/sysfs.h>
++#include "addr-map.h"
++
++static DEFINE_MUTEX(fc_mutex);
++static bool enabled;
++static bool autostart = true;
++module_param(autostart, bool, 0444);
++static bool voltage_autostart = true;
++module_param(voltage_autostart, bool, 0444);
++static unsigned int transitions;
++static bool dvfs;
++static struct regmap *power_map;
++static struct device *power_dev;
++static unsigned int rail_uv = 1250000;
++static unsigned int voltage_changes;
++static bool ddr_low = true, ddr_fault;
++static unsigned int ddr_transitions, ddr_busy, ddr_total, ddr_percent;
++static void __iomem *mc;
++static struct devfreq *ddr_devfreq;
++static struct cpufreq_policy *cpu_policy;
++static bool ddr_auto = true;
++module_param(ddr_auto, bool, 0444);
++static u64 ddr_sample_start_ns;
++static bool ddr_sample_valid;
++static struct dev_pm_qos_request ddr_thermal_qos;
++static void ddr_limit_poll(struct work_struct *work);
++static DECLARE_DELAYED_WORK(ddr_limit_work,ddr_limit_poll);
++
++/* The observed profile-5 vendor table needs 1175mV for VL2 and 1262.5mV
++ * for VL3. Retain the VL2 floor for CP/GPU/VPU; round VL3 up to 1275mV.
++ * DDR must first leave 533MHz (which requires VL3) for its vendor 312MHz OP.
++ * Hardware DVC stays disabled: only its statically selected PM822 slot 0
++ * is changed. Other voltage slots, rails and DVC pins are untouched.
++ */
++static int set_rail(unsigned int uv)
++{
++	unsigned int value, sel = (uv - 600000) / 12500;
++	int ret;
++	if (uv != 1175000 && uv != 1250000 && uv != 1275000)
++		return -EINVAL;
++	ret = regmap_update_bits(power_map, 0x3c, 0x7f, sel);
++	if (ret) return ret;
++	udelay(100); /* vendor ramp + launch bound, with additional margin */
++	ret = regmap_read(power_map, 0x3c, &value);
++	if (ret || (value & 127) != sel) return ret ?: -EIO;
++	rail_uv = uv; voltage_changes++;
++	return 0;
++}
++
++/* The profile-5 VL2 floor covers GC624. Verify the actual shared slot
++ * before a GPU clock increase; CPU and DDR remain the only rail writers.
++ */
++int t110_gpu_voltage_ready(void);
++int t110_gpu_voltage_ready(void)
++{
++	unsigned int value;
++	int ret;
++	mutex_lock(&fc_mutex);
++	ret = !dvfs ? -EAGAIN : regmap_read(power_map, 0x3c, &value);
++	if (!ret && (value & 127) < 46) ret = -ERANGE;
++	mutex_unlock(&fc_mutex);
++	return ret;
++}
++
++static int ddr_fc(void *data)
++{
++	bool low = *(bool *)data;
++	u32 value, cc, fccr, tbl;
++	int ret;
++	ret = readl_poll_timeout_atomic(APMU_REG(0xc), value,
++		!(value & BIT(24)) && (value & BIT(25)), 1, 10000);
++	if (ret) goto unlock;
++	writel(readl(APMU_REG(0x98)) | BIT(1), APMU_REG(0x98));
++	writel(readl(APMU_REG(0x88)) | BIT(0) | BIT(1) | BIT(3) |
++		BIT(21) | BIT(22), APMU_REG(0x88));
++	writel(readl(APMU_REG(0)) | BIT(27), APMU_REG(0));
++	writel(readl(APMU_REG(0xa0)) & ~BIT(1), APMU_REG(0xa0));
++	fccr=readl(MPMU_REG(8));
++	writel((fccr & ~(3U << 23)) | ((low ? 1U : 3U) << 23), MPMU_REG(8));
++	readl(MPMU_REG(8));
++	tbl=readl(APMU_REG(0xb0));
++	writel((tbl & ~(BIT(6) | GENMASK(5,3))) | ((low ? 3 : 5) << 3), APMU_REG(0xb0));
++	cc=readl(APMU_REG(4));
++	cc &= ~(GENMASK(14,12) | BIT(24) | BIT(25) | BIT(26));
++	writel(cc | BIT(27) | BIT(25), APMU_REG(4));
++	ret=readl_poll_timeout_atomic(APMU_REG(0xa0),value,value & BIT(1),1,10000);
++	writel(readl(APMU_REG(4)) & ~BIT(25), APMU_REG(4));
++	writel(readl(APMU_REG(0xa0)) & ~BIT(1), APMU_REG(0xa0));
++	if (!ret && (((readl(APMU_REG(0xc4)) >> 4) & 3) != (low ? 1 : 3) ||
++		(readl(APMU_REG(0xc)) & GENMASK(14,12)))) ret=-EIO;
++unlock:
++	writel(readl(APMU_REG(4)) | BIT(31), APMU_REG(4));
++	writel(readl(APMU_REG(4)) & ~BIT(31), APMU_REG(4));
++	return ret;
++}
++static struct cpufreq_frequency_table t110_table[] = {
++	{ .frequency = 312000 }, { .frequency = 624000 },
++	{ .frequency = 1066000 }, { .frequency = 1205000 },
++	{ .frequency = CPUFREQ_TABLE_END },
++};
++
++/* PLLs stay enabled; the boot SRAM RTC/WTC stay untouched.
++ * L2 <= 602MHz, DDR-interface <= 602MHz, BIU <= 301MHz at every point.
++ * All points retain CC2_AP.peri_clk_div=1, hence the TWD clock is CPU/8.
++ */
++static const u32 selectors[] = { 0, 0, 2, 1 };
++static const u32 dividers[] = { 0x49, 0x240, 0x240, 0x240 };
++
++static unsigned int t110_rate(void)
++{
++	u32 sel = (readl(APMU_REG(0xc4)) >> 2) & 3;
++	u32 div = readl(APMU_REG(0xc)) & 7;
++	unsigned int rate = sel == 0 ? 624000 : sel == 2 ? 1066000 : 1205000;
++	writel(readl(APMU_REG(4)) | BIT(31), APMU_REG(4));
++	writel(readl(APMU_REG(4)) & ~BIT(31), APMU_REG(4));
++	return rate / (div + 1);
++}
++
++static unsigned int t110_get(unsigned int cpu)
++{
++	unsigned int rate;
++	mutex_lock(&fc_mutex);
++	rate = t110_rate();
++	mutex_unlock(&fc_mutex);
++	return rate;
++}
++
++/* stop_machine keeps both CPUs out of normal work during the shared change.
++ * APB clocksource, DDR, AXI and USB source clocks are not changed.
++ */
++static int t110_fc(void *data)
++{
++	unsigned int index = *(unsigned int *)data;
++	u32 value, cc, fccr;
++	int ret;
++
++	ret = readl_poll_timeout_atomic(APMU_REG(0xc), value,
++		!(value & BIT(24)) && (value & BIT(25)), 1, 10000);
++	if (ret)
++		goto unlock;
++	/* Same AP-FC acknowledgement settings as the vendor driver. */
++	writel(readl(APMU_REG(0x98)) | BIT(1), APMU_REG(0x98));
++	writel(readl(APMU_REG(0x88)) | BIT(0) | BIT(1) | BIT(3) |
++		BIT(21) | BIT(22), APMU_REG(0x88));
++	writel(readl(APMU_REG(0)) | BIT(27), APMU_REG(0));
++	writel(readl(APMU_REG(0xa0)) & ~BIT(1), APMU_REG(0xa0));
++	fccr = readl(MPMU_REG(8));
++	writel((fccr & ~(7U << 29)) | (selectors[index] << 29), MPMU_REG(8));
++	readl(MPMU_REG(8));
++	cc = readl(APMU_REG(4));
++	cc &= ~(GENMASK(11, 0) | BIT(24) | BIT(25) | BIT(26) | BIT(28));
++	cc |= dividers[index] | GENMASK(23, 18) | BIT(27);
++	writel(cc | BIT(24), APMU_REG(4));
++	ret = readl_poll_timeout_atomic(APMU_REG(0xa0), value,
++		value & BIT(1), 1, 10000);
++	writel(readl(APMU_REG(4)) & ~BIT(24), APMU_REG(4));
++	writel(readl(APMU_REG(0xa0)) & ~BIT(1), APMU_REG(0xa0));
++	if (!ret && (((readl(APMU_REG(0xc4)) >> 2) & 3) != selectors[index] ||
++		(readl(APMU_REG(0xc)) & GENMASK(11, 0)) != dividers[index]))
++		ret = -EIO;
++unlock:
++	writel(readl(APMU_REG(4)) | BIT(31), APMU_REG(4));
++	writel(readl(APMU_REG(4)) & ~BIT(31), APMU_REG(4));
++	return ret;
++}
++
++static int t110_target(struct cpufreq_policy *policy, unsigned int index)
++{
++	int ret;
++	unsigned int target_uv;
++	mutex_lock(&fc_mutex);
++	target_uv = (index == 3 || !ddr_low || ddr_fault) ? 1275000 : 1175000;
++	/* Always verify the high selector before the top clock, even if a
++	 * previous reduction wrote successfully but its readback failed.
++	 * In that case the cached rail value cannot establish hardware voltage.
++	 */
++	if (dvfs && target_uv == 1275000) {
++		ret = set_rail(target_uv);
++		if (ret) goto out;
++	}
++	ret = stop_machine(t110_fc, &index, cpumask_of(0));
++	if (!ret) {
++		transitions++;
++		if (dvfs && target_uv < rail_uv && set_rail(target_uv)) {
++			/* Frequency changed successfully. Keep the higher voltage on
++			 * a failed reduction; do not tell cpufreq the clock stayed old.
++			 */
++			pr_err("t110-dvfs: voltage reduction failed; retaining higher rail\n");
++		}
++	} else
++		pr_err("t110-cpufreq: transition to %u failed: %d, now %u kHz\n",
++			t110_table[index].frequency, ret, t110_rate());
++out:
++	mutex_unlock(&fc_mutex);
++	return ret;
++}
++
++static int t110_policy_init(struct cpufreq_policy *policy)
++{
++	cpufreq_generic_init(policy, t110_table, 1000000);
++	policy->shared_type = CPUFREQ_SHARED_TYPE_ALL;
++	policy->transition_delay_us = 100000;
++	cpu_policy = policy;
++	return 0;
++}
++
++static struct cpufreq_driver t110_driver = {
++	.name = "t110-pxa986",
++	.flags = CPUFREQ_NEED_INITIAL_FREQ_CHECK | CPUFREQ_IS_COOLING_DEV,
++	.verify = cpufreq_generic_frequency_table_verify,
++	.target_index = t110_target,
++	.get = t110_get,
++	.init = t110_policy_init,
++};
++
++static ssize_t enable_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%u\n", enabled);
++}
++
++static ssize_t enable_store(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t count)
++{
++	bool value;
++	int ret;
++	if (kstrtobool(buf, &value) || !value || enabled)
++		return -EINVAL;
++	/* Only accept the exact, observed T110 A0 boot configuration. Fail closed
++	 * on an unrecognised PLL, divider or timer setup; never reprogram a PLL.
++	 */
++	if (readl(MPMU_REG(0x1c)) != 0xc1163 ||
++		readl(MPMU_REG(0x34)) != 0x1bd800 ||
++		readl(APB_VIRT_BASE + 0x90104) != 0x668b5228 ||
++		readl(APB_VIRT_BASE + 0x90108) != 0x66825008 ||
++		readl(APMU_REG(0x100)) != 1 || t110_get(0) != 1205000)
++		return -ENODEV;
++	ret = cpufreq_register_driver(&t110_driver);
++	if (ret)
++		return ret;
++	enabled = true;
++	pr_info("t110-cpufreq: enabled shared clock scaling, boot voltage retained\n");
++	return count;
++}
++static DEVICE_ATTR_RW(enable);
++
++static ssize_t registers_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	void __iomem *ciu = ioremap(0xd4282c00, 0x100);
++	int n;
++	mutex_lock(&fc_mutex);
++	n = sysfs_emit(buf,
++		"CC_CP=%08x CC_AP=%08x DM_CC_AP=%08x CC2_AP=%08x DM_CC2_AP=%08x\n"
++		"PLL_SEL=%08x FCCR=%08x PLL2CR=%08x PLL3CR=%08x POSR=%08x\n"
++		"PLL2SW=%08x PLL3SW=%08x DEBUG=%08x IMR=%08x ISR=%08x\n"
++		"CHIP_ID=%08x SRAM0=%08x SRAM1=%08x\n",
++		readl(APMU_REG(0)), readl(APMU_REG(4)), readl(APMU_REG(0xc)),
++		readl(APMU_REG(0x100)), readl(APMU_REG(0x104)),
++		readl(APMU_REG(0xc4)), readl(MPMU_REG(8)),
++		readl(MPMU_REG(0x34)), readl(MPMU_REG(0x1c)), readl(MPMU_REG(0x10)),
++		readl(APB_VIRT_BASE + 0x90104), readl(APB_VIRT_BASE + 0x90108),
++		readl(APMU_REG(0x88)), readl(APMU_REG(0x98)), readl(APMU_REG(0xa0)),
++		ciu ? readl(ciu) : 0, ciu ? readl(ciu + 0xc8) : 0,
++		ciu ? readl(ciu + 0xcc) : 0);
++	/* Reading DM_CC_AP acquires the AP clock-register latch: release it. */
++	writel(readl(APMU_REG(4)) | BIT(31), APMU_REG(4));
++	writel(readl(APMU_REG(4)) & ~BIT(31), APMU_REG(4));
++	iounmap(ciu);
++	mutex_unlock(&fc_mutex);
++	n += sysfs_emit_at(buf, n, "TRANSITIONS=%u VOLTAGE=%s\n", transitions,
++		dvfs ? "software-scaled" : "boot-fixed");
++	return n;
++}
++static DEVICE_ATTR_RO(registers);
++
++/* Audio shares FCCR with CPU/DDR source selection. Never update bit 28
++ * from an independent read/modify/write while a frequency change runs.
++ */
++int t110_audio_clock_source(void);
++int t110_audio_clock_source(void)
++{
++	int ret;
++	mutex_lock(&fc_mutex);
++	writel(readl(MPMU_REG(8))|BIT(28),MPMU_REG(8));
++	ret=(readl(MPMU_REG(8))&BIT(28))?0:-EIO;
++	mutex_unlock(&fc_mutex);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(t110_audio_clock_source);
++
++static ssize_t voltage_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	u32 gate=readl(APMU_REG(0x68)), fuse, dro;
++	writel(gate | 9, APMU_REG(0x68)); udelay(10);
++	fuse=readl(AXI_VIRT_BASE+0x1420); dro=readl(AXI_VIRT_BASE+0x1418);
++	writel(gate, APMU_REG(0x68));
++	return sysfs_emit(buf,"DVCR=%08x AP=%08x CP=%08x DP=%08x APSUB=%08x CHIP=%08x STATUS=%08x IMR=%08x ISR=%08x\nST01=%08x ST12=%08x ST23=%08x FUSE=%08x DRO=%08x\n",
++		readl(MPMU_REG(0x2000)),readl(MPMU_REG(0x2020)),readl(MPMU_REG(0x2024)),
++		readl(MPMU_REG(0x2028)),readl(MPMU_REG(0x202c)),readl(MPMU_REG(0x2030)),
++		readl(MPMU_REG(0x2040)),readl(MPMU_REG(0x2050)),readl(MPMU_REG(0x2054)),
++		readl(MPMU_REG(0x2004)),readl(MPMU_REG(0x2008)),readl(MPMU_REG(0x200c)),fuse,dro);
++}
++static DEVICE_ATTR_RO(voltage);
++
++static ssize_t dvfs_enable_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf,"enabled=%u rail_uv=%u changes=%u ddr_floor_uv=1175000\n",dvfs,rail_uv,voltage_changes);
++}
++static ssize_t dvfs_enable_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
++{
++	bool value, low=true;
++	u32 gate, fuse;
++	unsigned int slot;
++	int ret=0;
++	if (kstrtobool(buf,&value) || !value) return -EINVAL;
++	mutex_lock(&fc_mutex);
++	if (dvfs) {ret=-EBUSY;goto out;}
++	gate=readl(APMU_REG(0x68));writel(gate|9,APMU_REG(0x68));udelay(10);
++	fuse=readl(AXI_VIRT_BASE+0x1420);writel(gate,APMU_REG(0x68));
++	/* Exact observed board, profile 5, no active hardware voltage voting. */
++	if (fuse!=0x03ffc007 || readl(MPMU_REG(0x2000)) || readl(MPMU_REG(0x2040)) ||
++		(readl(APMU_REG(0xc4)) & 0x30)!=0x30) {ret=-ENODEV;goto out;}
++	power_dev=bus_find_device_by_name(&i2c_bus_type,NULL,"2-0031");
++	if (!power_dev) {ret=-EPROBE_DEFER;goto out;}
++	power_map=dev_get_regmap(power_dev,NULL);
++	if (!power_map) {ret=-ENODEV;goto out;}
++	ret=regmap_read(power_map,0x3c,&slot);
++	if (ret || slot!=0x34) {ret=ret ?: -ENODEV;goto out;}
++	ret=set_rail(1275000);
++	if (ret) goto out;
++	/* Reuse the same bootloader DDR hardware tables used by the vendor:
++	 * table 3 = 312MHz, table 5 = 533MHz. No timing-table writes.
++	 */
++	ret=stop_machine(ddr_fc,&low,cpumask_of(0));
++	if (ret) goto out; /* never undervolt if DDR transition is unconfirmed */
++	dvfs=true;
++	if (t110_rate()<1205000) ret=set_rail(1175000);
++	pr_info("t110-dvfs: profile5, DDR312, software BUCK1 1175/1275mV\n");
++out:
++	mutex_unlock(&fc_mutex);
++	return ret ?: count;
++}
++static DEVICE_ATTR_RW(dvfs_enable);
++
++/* Counter events and reset/start sequence match the vendor MCK4 driver.
++ * At 100ms, even the total-cycle counter cannot wrap at 533MHz. Resetting
++ * also avoids accumulating a sample across a frequency transition.
++ */
++static void ddr_counter_reset(void)
++{
++	writel(0, mc + 0x440);
++	writel(0x10, mc + 0x448);
++	writel(0, mc + 0x450); writel(0, mc + 0x454);
++	writel(0, mc + 0x458); writel(0, mc + 0x45c);
++	writel(15, mc + 0x444);
++	writel(0x84948180, mc + 0x440);
++	ddr_sample_start_ns=ktime_get_ns();
++}
++
++static unsigned long ddr_rate(void)
++{
++	u32 source = (readl(APMU_REG(0xc4)) >> 4) & 3;
++	return source == 1 ? 312000000 : source == 3 ? 533000000 : 0;
++}
++
++static bool ddr_thermal_limited(void)
++{
++	/* A frequency cap (including the thermal cooling device) conservatively
++	 * caps DDR too. No cpufreq lock or thermal-zone lock under fc_mutex.
++	 * This built-in board driver has no CPU hotplug/policy removal path.
++	 */
++	return cpu_policy && READ_ONCE(cpu_policy->max) < 1205000;
++}
++
++static int ddr_target(struct device *dev, unsigned long *freq, u32 flags)
++{
++	struct dev_pm_opp *opp;
++	bool low;
++	int ret=0;
++	opp=devfreq_recommended_opp(dev,freq,flags);
++	if (IS_ERR(opp)) return PTR_ERR(opp);
++	dev_pm_opp_put(opp);
++	mutex_lock(&fc_mutex);
++	if (!dvfs || ddr_fault) {ret=-EIO;goto out;}
++	low=*freq<=312000000 || ddr_thermal_limited();
++	if (low == ddr_low) goto out;
++	if (!low) {
++		/* Always read back high voltage before a memory speed-up. */
++		ret=set_rail(1275000);
++		if (ret) goto out;
++	}
++	ret=stop_machine(ddr_fc,&low,cpumask_of(0));
++	if (ret) {
++		ddr_fault=true;
++		set_rail(1275000);
++		pr_err("t110-ddr: transition failed: %d; voltage held high\n",ret);
++		goto out;
++	}
++	ddr_low=low;ddr_transitions++;
++	ddr_counter_reset();
++	if (low && t110_rate()<1205000 && set_rail(1175000))
++		pr_err("t110-ddr: voltage reduction failed\n");
++out:
++	*freq=ddr_rate();
++	mutex_unlock(&fc_mutex);
++	return ret;
++}
++
++static int ddr_status(struct device *dev, struct devfreq_dev_status *stat)
++{
++	u64 busy;
++	mutex_lock(&fc_mutex);
++	writel(0,mc+0x440);
++	ddr_total=readl(mc+0x450);
++	busy=(u64)readl(mc+0x458)*4;
++	ddr_busy=min_t(u64,busy,ddr_total);
++	ddr_percent=ddr_total ? div_u64((u64)ddr_busy*100,ddr_total) : 0;
++	/* Devfreq can defer idle polling. Reject intervals long enough to risk
++	 * a 32-bit counter wrap instead of trusting the unreliable overflow flag.
++	 * A zero total makes simple_ondemand choose the safe high point for one
++	 * fresh interval. The thermal frequency cap still takes precedence.
++	 */
++	ddr_sample_valid=ktime_get_ns()-ddr_sample_start_ns < 2ULL*NSEC_PER_SEC;
++	stat->current_frequency=ddr_rate();
++	/* Scale both values to avoid 32-bit arithmetic overflow in governor. */
++	stat->total_time=ddr_total>>8;
++	stat->busy_time=ddr_thermal_limited() ? 0 : ddr_busy>>8;
++	if (!ddr_sample_valid) {stat->total_time=0;stat->busy_time=0;}
++	ddr_counter_reset();
++	mutex_unlock(&fc_mutex);
++	return 0;
++}
++
++static int ddr_current(struct device *dev, unsigned long *freq)
++{
++	*freq=ddr_rate();return *freq ? 0 : -EIO;
++}
++static struct devfreq_dev_profile ddr_profile={
++	.initial_freq=312000000,.polling_ms=100,
++	.target=ddr_target,.get_dev_status=ddr_status,.get_cur_freq=ddr_current,
++};
++static struct devfreq_simple_ondemand_data ddr_governor={.upthreshold=25,.downdifferential=10};
++
++static ssize_t ddr_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	int n;
++	mutex_lock(&fc_mutex);
++	n=sysfs_emit(buf,"frequency_hz=%lu rail_uv=%u transitions=%u busy=%u total=%u utilization_pct=%u sample_valid=%u thermal_limited=%u fault=%u\n",
++		ddr_rate(),rail_uv,ddr_transitions,ddr_busy,ddr_total,ddr_percent,ddr_sample_valid,ddr_thermal_limited(),ddr_fault);
++	mutex_unlock(&fc_mutex);return n;
++}
++static DEVICE_ATTR_RO(ddr);
++
++static void ddr_limit_poll(struct work_struct *work)
++{
++	/* Use devfreq's standard frequency QoS path, outside fc_mutex, so a
++	 * thermal cap works even with the performance/userspace governors.
++	 */
++	if (!READ_ONCE(dvfs)) return;
++	dev_pm_qos_update_request(&ddr_thermal_qos,ddr_thermal_limited() ? 312000 : 533000);
++	schedule_delayed_work(&ddr_limit_work,msecs_to_jiffies(500));
++}
++
++static int ddr_register(struct device *dev)
++{
++	int ret;
++	mc=ioremap(0xc0100000,0x1000);
++	if (!mc) return -ENOMEM;
++	ret=dev_pm_opp_add(dev,312000000,1175000);if (ret) return ret;
++	ret=dev_pm_opp_add(dev,533000000,1275000);if (ret) return ret;
++	ret=dev_pm_qos_add_request(dev,&ddr_thermal_qos,DEV_PM_QOS_MAX_FREQUENCY,533000);
++	if (ret<0) return ret;
++	ddr_counter_reset();
++	ddr_devfreq=devfreq_add_device(dev,&ddr_profile,
++		ddr_auto ? DEVFREQ_GOV_SIMPLE_ONDEMAND : DEVFREQ_GOV_USERSPACE,&ddr_governor);
++	if (IS_ERR(ddr_devfreq)) return PTR_ERR(ddr_devfreq);
++	schedule_delayed_work(&ddr_limit_work,msecs_to_jiffies(500));
++	return device_create_file(dev,&dev_attr_ddr);
++}
++
++static int voltage_reboot(struct notifier_block *nb, unsigned long event, void *unused)
++{
++	cancel_delayed_work_sync(&ddr_limit_work);
++	mutex_lock(&fc_mutex);
++	if (dvfs) {
++		bool low=true;
++		dvfs=false;
++		/* Stop accepting governor changes before restoring the boot rail.
++		 * Bring DDR low first, so the reboot handoff cannot undervolt DDR533.
++		 */
++		if (ddr_fault)
++			pr_err("t110-ddr: faulted controller; retaining high rail for reboot\n");
++		else if (!ddr_low && stop_machine(ddr_fc,&low,cpumask_of(0)))
++			pr_err("t110-ddr: reboot DDR reduction failed; retaining high rail\n");
++		else if (set_rail(1250000)) pr_err("t110-dvfs: boot voltage restore failed\n");
++	}
++	mutex_unlock(&fc_mutex);
++	return NOTIFY_DONE;
++}
++static struct notifier_block voltage_reboot_nb={.notifier_call=voltage_reboot};
++
++static int __init t110_cpufreq_init(void)
++{
++	struct platform_device *pdev;
++	pdev = platform_device_register_simple("t110-cpufreq", -1, NULL, 0);
++	if (IS_ERR(pdev))
++		return PTR_ERR(pdev);
++	if (device_create_file(&pdev->dev, &dev_attr_registers))
++		return -EINVAL;
++	if (device_create_file(&pdev->dev, &dev_attr_voltage))
++		return -EINVAL;
++	if (device_create_file(&pdev->dev, &dev_attr_dvfs_enable))
++		return -EINVAL;
++	register_reboot_notifier(&voltage_reboot_nb);
++	if (device_create_file(&pdev->dev, &dev_attr_enable))
++		return -EINVAL;
++	if (autostart) {
++		int ret = enable_store(&pdev->dev, NULL, "1", 1);
++		if (ret < 0)
++			pr_err("t110-cpufreq: automatic registration refused: %d\n", ret);
++	}
++	if (enabled && voltage_autostart) {
++		int ret = dvfs_enable_store(&pdev->dev, NULL, "1", 1);
++		if (ret < 0) pr_err("t110-dvfs: automatic activation refused: %d\n",ret);
++	}
++	if (dvfs) {
++		int ret=ddr_register(&pdev->dev);
++		if (ret) pr_err("t110-ddr: devfreq registration failed: %d\n",ret);
++	}
++	return 0;
++}
++late_initcall(t110_cpufreq_init);
+diff --git a/arch/arm/mach-mmp/pxa98x-display.c b/arch/arm/mach-mmp/pxa98x-display.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-display.c
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Guarded reuse of the SM-T110 bootloader's running display. */
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/platform_device.h>
++#include <linux/platform_data/simplefb.h>
++#include "addr-map.h"
++
++static int __init t110_display_handoff(void)
++{
++	void __iomem *lcd = AXI_VIRT_BASE + 0xb000;
++	u32 address = readl(lcd + 0xf4), pitch = readl(lcd + 0xfc) & 0xffff;
++	u32 size = readl(lcd + 0x104), ctrl = readl(lcd + 0x190);
++	u32 format = (ctrl >> 16) & 15;
++	struct simplefb_platform_data pdata = { .width = 1024, .height = 600 };
++	struct resource resource;
++	struct platform_device *pdev;
++	pr_info("T110_DISPLAY_D: scanout=%08x pitch=%u size=%08x DMA=%08x\n",
++		address, pitch, size, ctrl);
++	/* Never map arbitrary controller addresses as a writable framebuffer. */
++	if (address != 0x17000000 || size != 0x02580400 || !(ctrl & BIT(8)) ||
++	    (ctrl & (BIT(15) | BIT(9)))) {
++		pr_err("T110_DISPLAY_D: unsupported display handoff; no framebuffer registered\n");
++		return -ENODEV;
++	}
++	if (format == 4 && pitch == 4096)
++		/* Vendor set_dma_control0: swaprb = (pix_fmt & 1) ^ 1,
++		 * goyawifi panel_rbswap=0. Thus bit12=1 means RGB, red at16.
++		 */
++		pdata.format = ctrl & BIT(12) ? "a8r8g8b8" : "a8b8g8r8";
++	else if (format == 0 && pitch == 2048 && !(ctrl & BIT(12)))
++		pdata.format = "r5g6b5";
++	else {
++		pr_err("T110_DISPLAY_D: unsupported pixel format %u\n", format);
++		return -ENODEV;
++	}
++	pdata.stride = pitch;
++	resource = (struct resource) {
++		.start = address, .end = address + pitch * 600 - 1,
++		.flags = IORESOURCE_MEM,
++	};
++	pdev = platform_device_register_resndata(NULL, "simple-framebuffer", 0,
++		&resource, 1, &pdata, sizeof(pdata));
++	return PTR_ERR_OR_ZERO(pdev);
++}
++late_initcall(t110_display_handoff);
+diff --git a/arch/arm/mach-mmp/pxa98x-gps.c b/arch/arm/mach-mmp/pxa98x-gps.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-gps.c
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 GPS power controls, matching the vendor board's sirf API. */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/gpio/consumer.h>
++#include <linux/regulator/consumer.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/uaccess.h>
++#include <linux/delay.h>
++#include <linux/mutex.h>
++struct t110_gps {
++ struct gpio_desc *reset,*onoff,*clock;
++ struct regulator *supply;
++ struct mutex lock;
++ bool powered;
++};
++static int gps_command(struct t110_gps *g,const char *cmd) {
++ int ret=0;
++ mutex_lock(&g->lock);
++ if(!strcmp(cmd,"on")||!strcmp(cmd,"off")) {
++  bool on=!strcmp(cmd,"on");
++  gpiod_set_value_cansleep(g->clock,0);
++  gpiod_set_value_cansleep(g->reset,1);
++  gpiod_set_value_cansleep(g->onoff,0);
++  if(on&&!g->powered) { ret=regulator_enable(g->supply);if(!ret)g->powered=true; }
++  else if(!on&&g->powered) {ret=regulator_disable(g->supply);if(!ret)g->powered=false;}
++  if(on&&!ret)msleep(20);
++ } else if(!strcmp(cmd,"reset 0")||!strcmp(cmd,"reset 1")) {
++  gpiod_set_value_cansleep(g->reset,cmd[6]=='0');
++ } else if(!strcmp(cmd,"sirfon 0")||!strcmp(cmd,"sirfon 1")) {
++  gpiod_set_value_cansleep(g->onoff,cmd[7]=='1');
++ } else if(!strcmp(cmd,"eclk 0")) {
++  gpiod_set_value_cansleep(g->clock,0);
++ } else ret=-EINVAL; /* Vendor platform disables optional ECLK. */
++ mutex_unlock(&g->lock);return ret;
++}
++static ssize_t control_store(struct device *dev,struct device_attribute *attr,const char *buf,size_t len) {
++ struct t110_gps *g=dev_get_drvdata(dev);char cmd[24];int ret;
++ if(len>=sizeof(cmd))return -EINVAL;
++ memcpy(cmd,buf,len);cmd[len]=0;strim(cmd);ret=gps_command(g,cmd);return ret?ret:len;
++}
++static ssize_t control_show(struct device *dev,struct device_attribute *attr,char *buf) {
++ struct t110_gps *g=dev_get_drvdata(dev);
++ return sysfs_emit(buf,"powered=%u reset_asserted=%d onoff=%d\n",g->powered,gpiod_get_value_cansleep(g->reset),gpiod_get_value_cansleep(g->onoff));
++}
++static DEVICE_ATTR_RW(control);
++static struct attribute *gps_attrs[]={&dev_attr_control.attr,NULL};
++static const struct attribute_group gps_group={.attrs=gps_attrs};
++static int gps_proc_show(struct seq_file *s,void *unused) {
++ struct t110_gps *g=s->private;seq_printf(s,"%s\n",g->powered?"on":"off");return 0;
++}
++static int gps_proc_open(struct inode *inode,struct file *file) {return single_open(file,gps_proc_show,pde_data(inode));}
++static ssize_t gps_proc_write(struct file *file,const char __user *buf,size_t len,loff_t *pos) {
++ struct t110_gps *g=pde_data(file_inode(file));char cmd[24];int ret;
++ if(len>=sizeof(cmd))return -EINVAL;
++ if(copy_from_user(cmd,buf,len))return -EFAULT;
++ cmd[len]=0;strim(cmd);ret=gps_command(g,cmd);return ret?ret:len;
++}
++static const struct proc_ops gps_proc_ops={.proc_open=gps_proc_open,.proc_read=seq_read,.proc_write=gps_proc_write,.proc_lseek=seq_lseek,.proc_release=single_release};
++static void gps_shutdown(struct platform_device *pdev) {gps_command(platform_get_drvdata(pdev),"off");}
++static int gps_suspend(struct device *dev) {
++ struct t110_gps *g=dev_get_drvdata(dev);
++ /* Do not silently interrupt a navigation session until userspace can quiesce it. */
++ return g->powered?-EBUSY:0;
++}
++static DEFINE_SIMPLE_DEV_PM_OPS(gps_pm,gps_suspend,NULL);
++static int gps_probe(struct platform_device *pdev) {
++ struct device *dev=&pdev->dev;struct t110_gps *g;int ret;
++ g=devm_kzalloc(dev,sizeof(*g),GFP_KERNEL);if(!g)return -ENOMEM;
++ mutex_init(&g->lock);
++ g->supply=devm_regulator_get(dev,"vcc");if(IS_ERR(g->supply))return dev_err_probe(dev,PTR_ERR(g->supply),"GPS supply\n");
++ g->reset=devm_gpiod_get(dev,"reset",GPIOD_OUT_HIGH);if(IS_ERR(g->reset))return PTR_ERR(g->reset);
++ g->onoff=devm_gpiod_get(dev,"onoff",GPIOD_OUT_LOW);if(IS_ERR(g->onoff))return PTR_ERR(g->onoff);
++ g->clock=devm_gpiod_get(dev,"clock",GPIOD_OUT_LOW);if(IS_ERR(g->clock))return PTR_ERR(g->clock);
++ platform_set_drvdata(pdev,g);
++ ret=devm_device_add_group(dev,&gps_group);if(ret)return ret;
++ if(!proc_create_data("driver/sirf",0600,NULL,&gps_proc_ops,g))return -ENOMEM;
++ dev_info(dev,"GPS UART2 controls ready; reset asserted, optional ECLK disabled\n");return 0;
++}
++static const struct of_device_id gps_match[]={{.compatible="samsung,t110-gps-control"},{}};
++static struct platform_driver gps_driver={.probe=gps_probe,.shutdown=gps_shutdown,.driver={.name="t110-gps",.of_match_table=gps_match,.pm=pm_sleep_ptr(&gps_pm)}};
++builtin_platform_driver(gps_driver);
+diff --git a/arch/arm/mach-mmp/pxa98x-gpu-power.c b/arch/arm/mach-mmp/pxa98x-gpu-power.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-gpu-power.c
+@@ -0,0 +1,160 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 bounded GC power/clock bring-up, derived from Marvell PXA988. */
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/clk-provider.h>
++#include <linux/mutex.h>
++
++extern int t110_gpu_voltage_ready(void);
++
++struct t110_gpu_power {
++	struct generic_pm_domain domain;
++	void __iomem *clock, *control, *timer, *status;
++	struct clk_hw hw;
++	struct mutex lock;
++	unsigned long rate;
++	unsigned int transitions;
++	bool fault;
++};
++
++/* Vendor A0 operating points: core/bus MHz = 156/156, 312/312,
++ * 416/312, 624/416. PLL1 sources are retained, never reprogrammed.
++ */
++static const unsigned long rates[] = {156000000,312000000,416000000,624000000};
++static const u32 core_bits[] = {BIT(6)|(3<<12),BIT(6)|(1<<12),0,BIT(6)};
++static const u32 bus_bits[] = {BIT(20)|(3<<17),BIT(20)|(1<<17),BIT(20)|(1<<17),0};
++static int gc_program(struct t110_gpu_power *p, unsigned long rate)
++{
++	u32 value, mask = GENMASK(7,6)|GENMASK(14,12)|GENMASK(21,20)|GENMASK(19,17);
++	int i,ret;
++	for(i=0;i<ARRAY_SIZE(rates);i++) if(rates[i]==rate) break;
++	if(i==ARRAY_SIZE(rates)) return -EINVAL;
++	value=readl(p->clock);
++	value=(value & ~mask)|core_bits[i]|bus_bits[i];
++	writel(value|BIT(15)|BIT(16),p->clock);
++	ret=readl_poll_timeout(p->clock,value,!(value&(BIT(15)|BIT(16))),1,10000);
++	if(!ret && (value&mask)!=(core_bits[i]|bus_bits[i])) ret=-EIO;
++	if(ret) p->fault=true;
++	return ret;
++}
++static unsigned long gc_recalc(struct clk_hw *hw,unsigned long parent)
++{
++	return READ_ONCE(container_of(hw,struct t110_gpu_power,hw)->rate);
++}
++static int gc_determine(struct clk_hw *hw,struct clk_rate_request *req)
++{
++	int i;
++	for(i=0;i<ARRAY_SIZE(rates)-1;i++) if(req->rate<=rates[i]) break;
++	req->rate=rates[i];return 0;
++}
++static int gc_set(struct clk_hw *hw,unsigned long rate,unsigned long parent)
++{
++	struct t110_gpu_power *p=container_of(hw,struct t110_gpu_power,hw);
++	int i,ret=0;
++	for(i=0;i<ARRAY_SIZE(rates);i++) if(rate==rates[i]) break;
++	if(i==ARRAY_SIZE(rates)) return -EINVAL;
++	mutex_lock(&p->lock);
++	if(p->fault){ret=-EIO;goto out;}
++	if(rate>p->rate){ret=t110_gpu_voltage_ready();if(ret)goto out;}
++	if(readl(p->status)&BIT(0)) ret=gc_program(p,rate);
++	if(!ret && rate!=p->rate){WRITE_ONCE(p->rate,rate);p->transitions++;}
++out:
++	mutex_unlock(&p->lock);return ret;
++}
++static const struct clk_ops gc_ops={.recalc_rate=gc_recalc,.determine_rate=gc_determine,.set_rate=gc_set};
++static ssize_t clocks_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++	struct t110_gpu_power *p=dev_get_drvdata(dev);
++	int n;
++	mutex_lock(&p->lock);
++	n=sysfs_emit(buf,"requested_hz=%lu register=%08x powered=%u transitions=%u fault=%u\n",p->rate,readl(p->clock),!!(readl(p->status)&1),p->transitions,p->fault);
++	mutex_unlock(&p->lock);return n;
++}
++static DEVICE_ATTR_RO(clocks);
++
++static int t110_gpu_on(struct generic_pm_domain *domain)
++{
++	struct t110_gpu_power *p = container_of(domain, struct t110_gpu_power, domain);
++	u32 value;
++	int ret;
++	mutex_lock(&p->lock);
++	if(p->fault){ret=-EIO;goto out;}
++	/* PLL1_624 / (3+1) = 156 MHz, for both core and AXI bus.
++	 * Only the GC clock/reset register is changed; CPU/DDR PLLs stay put.
++	 */
++	if(p->rate>156000000){ret=t110_gpu_voltage_ready();if(ret)goto out;}
++	writel(readl(p->clock)|BIT(3)|BIT(4)|BIT(5)|BIT(11),p->clock);
++	ret=gc_program(p,p->rate);
++	if(ret) goto out;
++	/* Vendor's hardware power sequencer handles isolation and resets. */
++	writel(0x20001fff, p->timer);
++	writel(readl(p->control) | BIT(0), p->control);
++	ret = readl_poll_timeout(p->status, value, value & BIT(0), 200, 10000);
++	if (ret) {
++		pr_err("T110_GPU_R: GC power-on timed out\n");
++		goto out;
++	}
++out:
++	mutex_unlock(&p->lock);return ret;
++}
++
++static int t110_gpu_off(struct generic_pm_domain *domain)
++{
++	struct t110_gpu_power *p = container_of(domain, struct t110_gpu_power, domain);
++	u32 value;
++	int ret;
++	mutex_lock(&p->lock);
++	writel(readl(p->control) & ~BIT(0), p->control);
++	ret = readl_poll_timeout(p->status, value, !(value & BIT(0)), 200, 10000);
++	if (!ret) writel(readl(p->clock) & ~(BIT(3) | BIT(4) | BIT(5)), p->clock);
++	mutex_unlock(&p->lock);return ret;
++}
++
++static int t110_gpu_power_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct t110_gpu_power *p;
++	struct clk_init_data init={.name="t110-gc-core",.ops=&gc_ops,.flags=CLK_GET_RATE_NOCACHE};
++	int ret;
++	if (!of_machine_is_compatible("samsung,goyawifi")) return -ENODEV;
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p) return -ENOMEM;
++	p->clock = devm_platform_ioremap_resource(pdev, 0);
++	p->control = devm_platform_ioremap_resource(pdev, 1);
++	p->timer = devm_platform_ioremap_resource(pdev, 2);
++	p->status = devm_platform_ioremap_resource(pdev, 3);
++	if (IS_ERR(p->clock)) return PTR_ERR(p->clock);
++	if (IS_ERR(p->control)) return PTR_ERR(p->control);
++	if (IS_ERR(p->timer)) return PTR_ERR(p->timer);
++	if (IS_ERR(p->status)) return PTR_ERR(p->status);
++	mutex_init(&p->lock);p->rate=156000000;
++	p->hw.init=&init;
++	ret=devm_clk_hw_register(dev,&p->hw);if(ret)return ret;
++	ret=devm_of_clk_add_hw_provider(dev,of_clk_hw_simple_get,&p->hw);if(ret)return ret;
++	dev_set_drvdata(dev,p);
++	ret=device_create_file(dev,&dev_attr_clocks);if(ret)return ret;
++	p->domain.name = "t110-gc";
++	p->domain.power_on = t110_gpu_on;
++	p->domain.power_off = t110_gpu_off;
++	ret = pm_genpd_init(&p->domain, NULL, true);
++	if (ret) return ret;
++	ret = of_genpd_add_provider_simple(dev->of_node, &p->domain);
++	if (ret) { pm_genpd_remove(&p->domain); return ret; }
++	dev_info(dev, "GC provider ready; GPU remains off until driver use, clock=%08x status=%08x\n",
++		readl(p->clock), readl(p->status));
++	return 0;
++}
++
++static const struct of_device_id t110_gpu_power_match[] = {
++	{ .compatible = "samsung,t110-gpu-power" }, { }
++};
++static struct platform_driver t110_gpu_power_driver = {
++	.probe = t110_gpu_power_probe,
++	.driver = { .name = "t110-gpu-power", .of_match_table = t110_gpu_power_match },
++};
++builtin_platform_driver(t110_gpu_power_driver);
+diff --git a/arch/arm/mach-mmp/pxa98x-pm822-monitor.c b/arch/arm/mach-mmp/pxa98x-pm822-monitor.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-pm822-monitor.c
+@@ -0,0 +1,264 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 voltage/NTC monitor and delegated charger state. RTC, ONKEY wake and PM822 IRQ support. */
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/reboot.h>
++#include <linux/workqueue.h>
++#include <linux/ktime.h>
++#include "t110-ntc.h"
++#include "t110-fuel-model.h"
++
++struct t110_monitor {
++ struct regmap *base,*adc;
++ struct mutex lock;
++ struct power_supply_desc battery_desc,usb_desc;
++ struct power_supply *battery;
++ struct delayed_work fuel_work;
++ struct t110_fuel_model fuel;
++ unsigned long last_store;
++ u64 last_fuel_ms;
++ int seed_percent;
++ struct rtc_device *rtc;
++ int irq;
++ unsigned int saved_int_en,saved_irq_cfg;
++ bool suppress_power,owns_wakeup;
++};
++#include "t110-pm822-rtc.h"
++static int adc_raw(struct t110_monitor *m,unsigned int reg)
++{
++ u8 b[2];int ret=regmap_bulk_read(m->adc,reg,b,2);
++ return ret?ret:(b[0]<<4)|(b[1]&15);
++}
++static int battery_temperature(struct t110_monitor *m,int *temperature)
++{
++ static const u8 biases[]={6,12,3,2,1};
++ int ret=-ENODATA,raw,mv,resistance,i,j;unsigned int old;
++ mutex_lock(&m->lock);
++ for(i=0;i<ARRAY_SIZE(biases);i++) {
++  ret=regmap_read(m->adc,0x0d,&old);if(ret)goto out;
++  if((old&15)!=biases[i]) {
++   ret=regmap_update_bits(m->adc,0x0d,15,biases[i]);if(ret)goto out;
++   msleep(50);
++  }
++  raw=adc_raw(m,0x58);if(raw<0){ret=raw;goto out;}
++  mv=(raw*700)>>11;
++  if(mv<=300||mv>=1250)continue;
++  resistance=mv*10000/(biases[i]*5+1);
++  if(resistance>t110_ntc[0] || resistance<t110_ntc[ARRAY_SIZE(t110_ntc)-1])continue;
++  for(j=0;j<ARRAY_SIZE(t110_ntc);j++)if(resistance>=t110_ntc[j])break;
++  ret=j-25;
++  /* Same GOYA thermistor calibration offset as the vendor driver. */
++  if(ret<50)ret-=3;
++  *temperature=ret*10;
++  ret=0;
++  goto out;
++ }
++ ret=-ENODATA;
++out:
++ mutex_unlock(&m->lock);
++ return ret;
++}
++static enum power_supply_property battery_props[]={
++ POWER_SUPPLY_PROP_STATUS,POWER_SUPPLY_PROP_PRESENT,
++ POWER_SUPPLY_PROP_TECHNOLOGY,POWER_SUPPLY_PROP_VOLTAGE_NOW,
++ POWER_SUPPLY_PROP_VOLTAGE_AVG,POWER_SUPPLY_PROP_TEMP,
++ POWER_SUPPLY_PROP_MODEL_NAME,
++ POWER_SUPPLY_PROP_HEALTH,POWER_SUPPLY_PROP_CAPACITY,
++};
++static int battery_get(struct power_supply *psy,enum power_supply_property prop,
++ union power_supply_propval *v)
++{
++ struct t110_monitor *m=power_supply_get_drvdata(psy);int raw,ret;
++ switch(prop) {
++ case POWER_SUPPLY_PROP_STATUS:
++ case POWER_SUPPLY_PROP_HEALTH: {
++  struct power_supply *charger=power_supply_get_by_name("t110-charger");
++  if(!charger){v->intval=prop==POWER_SUPPLY_PROP_STATUS?POWER_SUPPLY_STATUS_UNKNOWN:POWER_SUPPLY_HEALTH_UNKNOWN;return 0;}
++  ret=power_supply_get_property(charger,prop,v);power_supply_put(charger);return ret;
++ }
++ case POWER_SUPPLY_PROP_CAPACITY: {
++  mutex_lock(&m->lock);v->intval=fg_percent(&m->fuel);mutex_unlock(&m->lock);return 0;
++ }
++ case POWER_SUPPLY_PROP_PRESENT:v->intval=1;return 0; /* internal, non-removable */
++ case POWER_SUPPLY_PROP_TECHNOLOGY:v->intval=POWER_SUPPLY_TECHNOLOGY_LION;return 0;
++ case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++ case POWER_SUPPLY_PROP_VOLTAGE_AVG:
++  raw=adc_raw(m,prop==POWER_SUPPLY_PROP_VOLTAGE_NOW?0x42:0xa0);
++  if(raw<0)return raw;
++  if(!raw || raw==4095)return -ENODATA;
++  v->intval=DIV_ROUND_CLOSEST(raw*5600000LL,4096);return 0;
++ case POWER_SUPPLY_PROP_TEMP:
++  ret=battery_temperature(m,&v->intval);
++  return ret;
++ case POWER_SUPPLY_PROP_MODEL_NAME:v->strval="SM-T110 PM822 (GOYA software fuel model)";return 0;
++ default:return -EINVAL;
++ }
++}
++static enum power_supply_property usb_props[]={POWER_SUPPLY_PROP_ONLINE};
++static int usb_get(struct power_supply *psy,enum power_supply_property prop,
++ union power_supply_propval *v)
++{
++ struct t110_monitor *m=power_supply_get_drvdata(psy);unsigned int status;
++ int ret=regmap_read(m->base,1,&status);if(ret)return ret;
++ v->intval=!!(status&BIT(2));return 0;
++}
++static void onkey_poll(struct input_dev *input)
++{
++ struct t110_monitor *m=input_get_drvdata(input);unsigned int status;
++ if(regmap_read(m->base,1,&status))return;
++ if(READ_ONCE(m->suppress_power)){if(status&1)return;WRITE_ONCE(m->suppress_power,false);}
++ input_report_key(input,KEY_POWER,!!(status&1));input_sync(input);
++}
++static int fuel_store(struct t110_monitor *m)
++{
++ int ret;unsigned int old;int p=fg_div(m->fuel.soc,1000000);
++ ret=regmap_read(m->base,0xee,&old);if(ret)return ret;
++ ret=regmap_write(m->base,0xdd,fg_clamp(m->fuel.v1_uv/3000,-32,31)&0x3f);if(ret)return ret;
++ ret=regmap_write(m->base,0xde,fg_clamp(m->fuel.v2_uv/3000,-32,31)&0x3f);if(ret)return ret;
++ ret=regmap_write(m->base,0xe0,fg_div(m->fuel.soc-(long long)p*1000000,100000));if(ret)return ret;
++ return regmap_write(m->base,0xee,(old&0x80)|p);
++}
++static void fuel_update(struct work_struct *work)
++{
++ struct t110_monitor *m=container_of(to_delayed_work(work),struct t110_monitor,fuel_work);
++ struct power_supply *charger=power_supply_get_by_name("t110-charger");
++ union power_supply_propval status={.intval=POWER_SUPPLY_STATUS_UNKNOWN};
++ int raw,temp,old,ret;u64 now;
++ /* Never take the charger mutex while holding the monitor mutex. */
++ if(charger){power_supply_get_property(charger,POWER_SUPPLY_PROP_STATUS,&status);power_supply_put(charger);}
++ raw=adc_raw(m,0xa0);ret=battery_temperature(m,&temp);
++ if(raw>0&&raw<4095&&!ret) {
++  mutex_lock(&m->lock);now=div_u64(ktime_get_boottime_ns(),NSEC_PER_MSEC);
++  old=fg_percent(&m->fuel);
++  fg_step(&m->fuel,DIV_ROUND_CLOSEST(raw*5600000LL,4096),temp,
++   min_t(u64,5000,now-m->last_fuel_ms),status.intval==POWER_SUPPLY_STATUS_FULL);
++  m->last_fuel_ms=now;
++  if(time_after(jiffies,m->last_store+60*HZ)) {
++   ret=fuel_store(m);if(!ret)m->last_store=jiffies;
++  }
++  ret=old!=fg_percent(&m->fuel);mutex_unlock(&m->lock);
++  if(ret)power_supply_changed(m->battery);
++ }
++ schedule_delayed_work(&m->fuel_work,5*HZ);
++}
++static void fuel_stop(void *data)
++{
++ struct t110_monitor *m=data;cancel_delayed_work_sync(&m->fuel_work);
++ mutex_lock(&m->lock);fuel_store(m);mutex_unlock(&m->lock);
++}
++static ssize_t fuel_model_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);int n;
++ mutex_lock(&m->lock);
++ n=sysfs_emit(buf,"seed_percent=%d estimated_percent=%d soc_micro_percent=%lld v1_uV=%d v2_uV=%d modeled_current_uA=%d rs_milliohm=%d\n",
++ m->seed_percent,fg_percent(&m->fuel),m->fuel.soc,m->fuel.v1_uv,m->fuel.v2_uv,m->fuel.current_ua,m->fuel.rs_mohm);
++ mutex_unlock(&m->lock);return n;
++}
++static DEVICE_ATTR_RO(fuel_model);
++static struct attribute *fuel_attrs[]={&dev_attr_fuel_model.attr,NULL};
++static const struct attribute_group fuel_group={.attrs=fuel_attrs};
++/* The restart2 command is consumed while PMIC I2C can still sleep.
++ * This replaces the userspace /dev/i2c recovery-flag writer.
++ */
++static int monitor_restart_prepare(struct sys_off_data *data)
++{
++ struct t110_monitor *m=data->cb_data;
++ unsigned int value=data->cmd && !strcmp(data->cmd,"recovery") ? 6 : 0;
++ unsigned int check;
++ int ret=regmap_update_bits(m->base,0xef,0x1f,value);
++ if(!ret)ret=regmap_read(m->base,0xef,&check);
++ if(!ret && (check&0x1f)!=value)ret=-EIO;
++ if(ret)dev_err(data->dev,"PM822 restart reason failed: %d\n",ret);
++ return NOTIFY_DONE;
++}
++/* Sleepable shutdown phase: exact vendor PM822 power-down sequence. */
++static int monitor_poweroff(struct sys_off_data *data)
++{
++ struct t110_monitor *m=data->cb_data;
++ int ret=regmap_write(m->base,0xef,0xa0);
++ if(!ret)ret=regmap_update_bits(m->base,0x0d,BIT(5),BIT(5));
++ if(ret)pr_err("t110: PM822 power-off failed: %d\n",ret);
++ msleep(500);
++ return NOTIFY_DONE;
++}
++static int monitor_poweroff_failed(struct sys_off_data *data)
++{
++ pr_emerg("t110: PM822 power-off did not remove power\n");
++ return NOTIFY_DONE;
++}
++static int monitor_probe(struct i2c_client *client)
++{
++ struct device *dev=&client->dev;struct t110_monitor *m;
++ struct i2c_client *adc;struct input_dev *input;struct power_supply *psy;
++ struct regmap_config mapcfg={.reg_bits=8,.val_bits=8,.max_register=0xff};
++ struct power_supply_config cfg={.fwnode=dev_fwnode(dev)};
++ unsigned int id,saved,v1,v2,fraction;int ret,initial;
++ m=devm_kzalloc(dev,sizeof(*m),GFP_KERNEL);if(!m)return -ENOMEM;
++ mutex_init(&m->lock);
++ INIT_DELAYED_WORK(&m->fuel_work,fuel_update);
++ i2c_set_clientdata(client,m);
++ m->base=devm_regmap_init_i2c(client,&mapcfg);if(IS_ERR(m->base))return PTR_ERR(m->base);
++ ret=regmap_read(m->base,0,&id);if(ret)return ret;
++ if(id!=0x82)return dev_err_probe(dev,-ENODEV,"Expected PM822 ID82, got %02x\n",id);
++ adc=devm_i2c_new_dummy_device(dev,client->adapter,0x32);if(IS_ERR(adc))return PTR_ERR(adc);
++ m->adc=devm_regmap_init_i2c(adc,&mapcfg);if(IS_ERR(m->adc))return PTR_ERR(m->adc);
++ /* Enable only voltage and NTC measurements, preserving other ADC users. */
++ ret=regmap_update_bits(m->adc,1,BIT(2),BIT(2));if(ret)return ret;
++ ret=regmap_update_bits(m->adc,2,BIT(4),BIT(4));if(ret)return ret;
++ ret=regmap_update_bits(m->adc,6,3,3);if(ret)return ret;
++ ret=regmap_update_bits(m->adc,0x0d,15,6);if(ret)return ret;
++ ret=regmap_update_bits(m->adc,0x14,0x44,0x44);if(ret)return ret;
++ msleep(100);
++ /* Exact stock fuel-state slots. Preserve unrelated PMIC/RTC registers. */
++ ret=regmap_read(m->base,0xee,&saved);if(ret)return ret;
++ ret=regmap_read(m->base,0xdd,&v1);if(ret)return ret;
++ ret=regmap_read(m->base,0xde,&v2);if(ret)return ret;
++ ret=regmap_read(m->base,0xe0,&fraction);if(ret)return ret;
++ initial=saved&0x7f;
++ if((saved&0x80)||initial>100) {
++  int raw=adc_raw(m,0xa0),mv;if(raw<=0||raw>=4095)return -ENODATA;
++  mv=DIV_ROUND_CLOSEST(raw*5600,4096);
++  for(initial=0;initial<100&&mv>=t110_ocv[initial+1];initial++);
++  v1=v2=fraction=0;
++ }
++ m->seed_percent=initial;
++ fg_seed(&m->fuel,initial,sign_extend32(v1&0x3f,5)*3000,sign_extend32(v2&0x3f,5)*3000);
++ if(initial<100&&fraction<10)m->fuel.soc+=fraction*100000;
++ m->last_fuel_ms=div_u64(ktime_get_boottime_ns(),NSEC_PER_MSEC);m->last_store=jiffies;
++ cfg.drv_data=m;
++ m->battery_desc=(struct power_supply_desc){.name="t110-battery",.type=POWER_SUPPLY_TYPE_BATTERY,.properties=battery_props,.num_properties=ARRAY_SIZE(battery_props),.get_property=battery_get};
++ psy=devm_power_supply_register(dev,&m->battery_desc,&cfg);if(IS_ERR(psy))return PTR_ERR(psy);
++ m->battery=psy;
++ m->usb_desc=(struct power_supply_desc){.name="t110-usb",.type=POWER_SUPPLY_TYPE_USB,.properties=usb_props,.num_properties=ARRAY_SIZE(usb_props),.get_property=usb_get};
++ psy=devm_power_supply_register(dev,&m->usb_desc,&cfg);if(IS_ERR(psy))return PTR_ERR(psy);
++ input=devm_input_allocate_device(dev);if(!input)return -ENOMEM;
++ input->name="PM822 Power Button";input->id.bustype=BUS_I2C;
++ input_set_drvdata(input,m);input_set_capability(input,EV_KEY,KEY_POWER);
++ ret=input_setup_polling(input,onkey_poll);if(ret)return ret;
++ input_set_poll_interval(input,40);
++ ret=input_register_device(input);if(ret)return ret;
++ ret=t110_rtc_setup(client,m);if(ret)return ret;
++ ret=devm_register_sys_off_handler(dev,SYS_OFF_MODE_RESTART_PREPARE,
++  SYS_OFF_PRIO_DEFAULT,monitor_restart_prepare,m);if(ret)return ret;
++ ret=devm_register_sys_off_handler(dev,SYS_OFF_MODE_POWER_OFF_PREPARE,
++  SYS_OFF_PRIO_DEFAULT,monitor_poweroff,m);if(ret)return ret;
++ ret=devm_register_sys_off_handler(dev,SYS_OFF_MODE_POWER_OFF,
++  SYS_OFF_PRIO_DEFAULT,monitor_poweroff_failed,m);if(ret)return ret;
++ ret=devm_device_add_group(dev,&fuel_group);if(ret)return ret;
++ ret=devm_add_action_or_reset(dev,fuel_stop,m);if(ret)return ret;
++ schedule_delayed_work(&m->fuel_work,5*HZ);
++ dev_info(dev,"VBAT/NTC, GOYA RC fuel model seeded at %d%%, charger state, ONKEY and PM822 power-off\n",initial);
++ return 0;
++}
++static const struct of_device_id monitor_match[]={{.compatible="samsung,t110-pm822-monitor"},{}};
++MODULE_DEVICE_TABLE(of,monitor_match);
++static void monitor_shutdown(struct i2c_client *client){fuel_stop(i2c_get_clientdata(client));}
++static struct i2c_driver monitor_driver={.probe=monitor_probe,.shutdown=monitor_shutdown,.driver={.name="t110-pm822-monitor",.of_match_table=monitor_match,.pm=pm_sleep_ptr(&t110_monitor_pm)}};
++module_i2c_driver(monitor_driver);
++MODULE_LICENSE("GPL");
+diff --git a/arch/arm/mach-mmp/pxa98x-pm822-touch.c b/arch/arm/mach-mmp/pxa98x-pm822-touch.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-pm822-touch.c
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Bounded SM-T110 bring-up: PM822 power-page LDO1, touch analog rail only. */
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++static const unsigned int voltages[] = {
++ 1700000,1800000,1900000,2500000,2800000,2900000,3100000,3300000
++};
++static const struct regulator_ops touch_ops = {
++ .list_voltage=regulator_list_voltage_table,
++ .map_voltage=regulator_map_voltage_iterate,
++ .get_voltage_sel=regulator_get_voltage_sel_regmap,
++ .set_voltage_sel=regulator_set_voltage_sel_regmap,
++ .enable=regulator_enable_regmap,
++ .disable=regulator_disable_regmap,
++ .is_enabled=regulator_is_enabled_regmap,
++};
++static const struct regulator_desc touch_desc = {
++ .name="pm822-tsp-ldo1", .type=REGULATOR_VOLTAGE, .owner=THIS_MODULE,
++ .ops=&touch_ops, .volt_table=voltages, .n_voltages=ARRAY_SIZE(voltages),
++ .vsel_reg=0x08, .vsel_mask=0x0f, .enable_reg=0x51, .enable_mask=1,
++ .enable_time=15000,
++};
++static const unsigned int wifi_voltages[] = {
++ 1200000,1250000,1700000,1800000,1850000,1900000,2500000,2600000,
++ 2700000,2750000,2800000,2850000,2900000,3000000,3100000,3300000
++};
++static const struct regulator_desc wifi_desc = {
++ .name="pm822-wifi-ldo10", .type=REGULATOR_VOLTAGE, .owner=THIS_MODULE,
++ .ops=&touch_ops, .volt_table=wifi_voltages, .n_voltages=ARRAY_SIZE(wifi_voltages),
++ .vsel_reg=0x13, .vsel_mask=0x0f, .enable_reg=0x52, .enable_mask=BIT(1),
++ .enable_time=15000,
++};
++static const struct regulator_desc sensor_desc = {
++ .name="pm822-sensor-ldo11", .type=REGULATOR_VOLTAGE, .owner=THIS_MODULE,
++ .ops=&touch_ops, .volt_table=wifi_voltages, .n_voltages=ARRAY_SIZE(wifi_voltages),
++ .vsel_reg=0x14, .vsel_mask=0x0f, .enable_reg=0x52, .enable_mask=BIT(2),
++ .enable_time=15000,
++};
++static const struct regulator_desc gps_desc = {
++ .name="pm822-gps-ldo13",.type=REGULATOR_VOLTAGE,.owner=THIS_MODULE,
++ .ops=&touch_ops,.volt_table=voltages,.n_voltages=ARRAY_SIZE(voltages),
++ .vsel_reg=0x16,.vsel_mask=0x0f,.enable_reg=0x52,.enable_mask=BIT(4),.enable_time=15000,
++};
++static const unsigned int core_voltages[]={
++ 600000,650000,700000,750000,800000,850000,900000,950000,
++ 1000000,1050000,1100000,1150000,1200000,1300000,1400000,1500000
++};
++static const struct regulator_desc bridge_desc[]={
++ {.name="pm822-lvds-ldo9",.type=REGULATOR_VOLTAGE,.owner=THIS_MODULE,
++  .ops=&touch_ops,.volt_table=wifi_voltages,.n_voltages=ARRAY_SIZE(wifi_voltages),
++  .vsel_reg=0x12,.vsel_mask=0x0f,.enable_reg=0x52,.enable_mask=BIT(0),.enable_time=5000},
++ {.name="pm822-lvds-ldo12",.type=REGULATOR_VOLTAGE,.owner=THIS_MODULE,
++  .ops=&touch_ops,.volt_table=core_voltages,.n_voltages=ARRAY_SIZE(core_voltages),
++  .vsel_reg=0x15,.vsel_mask=0x0f,.enable_reg=0x52,.enable_mask=BIT(3),.enable_time=5000}
++};
++static const struct regulator_desc sd_desc[]={
++ {.name="pm822-sd-ldo4",.type=REGULATOR_VOLTAGE,.owner=THIS_MODULE,
++  .ops=&touch_ops,.volt_table=wifi_voltages,.n_voltages=ARRAY_SIZE(wifi_voltages),
++  .vsel_reg=0x0d,.vsel_mask=0x0f,.enable_reg=0x51,.enable_mask=BIT(3),.enable_time=15000},
++ {.name="pm822-sd-ldo5",.type=REGULATOR_VOLTAGE,.owner=THIS_MODULE,
++  .ops=&touch_ops,.volt_table=wifi_voltages,.n_voltages=ARRAY_SIZE(wifi_voltages),
++  .vsel_reg=0x0e,.vsel_mask=0x0f,.enable_reg=0x51,.enable_mask=BIT(4),.enable_time=15000}
++};
++static int touch_power_probe(struct i2c_client *client)
++{
++ struct regulator_config cfg={.dev=&client->dev,.of_node=client->dev.of_node};
++ struct regmap_config mapcfg={.reg_bits=8,.val_bits=8,.max_register=0xd8};
++ struct regulator_dev *rdev;
++ u8 reg=0,id=0;
++ struct i2c_msg msgs[]={{.addr=0x30,.len=1,.buf=&reg},
++  {.addr=0x30,.flags=I2C_M_RD,.len=1,.buf=&id}};
++ int ret=i2c_transfer(client->adapter,msgs,2);
++ if(ret!=2)return ret<0?ret:-EIO;
++ if(id!=0x82)return dev_err_probe(&client->dev,-ENODEV,"PM822 ID mismatch: %02x\n",id);
++ cfg.regmap=devm_regmap_init_i2c(client,&mapcfg);
++ if(IS_ERR(cfg.regmap))return PTR_ERR(cfg.regmap);
++ cfg.init_data=of_get_regulator_init_data(&client->dev,client->dev.of_node,&touch_desc);
++ rdev=devm_regulator_register(&client->dev,&touch_desc,&cfg);
++ if(IS_ERR(rdev))return PTR_ERR(rdev);
++ cfg.of_node=of_get_child_by_name(client->dev.of_node,"wifi-regulator");
++ if(cfg.of_node) {
++  cfg.init_data=of_get_regulator_init_data(&client->dev,cfg.of_node,&wifi_desc);
++  rdev=devm_regulator_register(&client->dev,&wifi_desc,&cfg);
++  of_node_put(cfg.of_node);
++  if(IS_ERR(rdev))return PTR_ERR(rdev);
++ }
++ for(int i=0;i<2;i++) {
++  unsigned int selector;
++  cfg.of_node=of_get_child_by_name(client->dev.of_node,i?"bridge-core-regulator":"bridge-io-regulator");
++  if(!cfg.of_node)continue;
++  ret=regmap_read(cfg.regmap,bridge_desc[i].vsel_reg,&selector);
++  if(ret||(selector&15)!=(i?12:3)) {
++   of_node_put(cfg.of_node);return dev_err_probe(&client->dev,ret?:-EINVAL,"Unexpected bridge LDO selector\n");
++  }
++  cfg.init_data=of_get_regulator_init_data(&client->dev,cfg.of_node,&bridge_desc[i]);
++  rdev=devm_regulator_register(&client->dev,&bridge_desc[i],&cfg);
++  of_node_put(cfg.of_node);if(IS_ERR(rdev))return PTR_ERR(rdev);
++ }
++ for(int i=0;i<2;i++) {
++  cfg.of_node=of_get_child_by_name(client->dev.of_node,i?"sd-io-regulator":"sd-card-regulator");
++  if(!cfg.of_node)continue;
++  cfg.init_data=of_get_regulator_init_data(&client->dev,cfg.of_node,&sd_desc[i]);
++  rdev=devm_regulator_register(&client->dev,&sd_desc[i],&cfg);
++  of_node_put(cfg.of_node);if(IS_ERR(rdev))return PTR_ERR(rdev);
++ }
++ cfg.of_node=of_get_child_by_name(client->dev.of_node,"sensor-regulator");
++ if(cfg.of_node) {
++  cfg.init_data=of_get_regulator_init_data(&client->dev,cfg.of_node,&sensor_desc);
++  rdev=devm_regulator_register(&client->dev,&sensor_desc,&cfg);
++  of_node_put(cfg.of_node);if(IS_ERR(rdev))return PTR_ERR(rdev);
++ }
++ cfg.of_node=of_get_child_by_name(client->dev.of_node,"gps-regulator");
++ if(cfg.of_node) {
++  cfg.init_data=of_get_regulator_init_data(&client->dev,cfg.of_node,&gps_desc);
++  rdev=devm_regulator_register(&client->dev,&gps_desc,&cfg);
++  of_node_put(cfg.of_node);if(IS_ERR(rdev))return PTR_ERR(rdev);
++ }
++ dev_info(&client->dev,"PM822 ID82: touch, Wi-Fi, bridge and SD LDO4/LDO5 registered\n");
++ return 0;
++}
++static const struct of_device_id touch_power_match[] = {
++ {.compatible="samsung,t110-pm822-touch-ldo1"},{}
++};
++MODULE_DEVICE_TABLE(of,touch_power_match);
++static struct i2c_driver touch_power_driver={
++ .probe=touch_power_probe,
++ .driver={.name="t110-pm822-touch",.of_match_table=touch_power_match},
++};
++module_i2c_driver(touch_power_driver);
++MODULE_LICENSE("GPL");
+diff --git a/arch/arm/mach-mmp/pxa98x-smp.c b/arch/arm/mach-mmp/pxa98x-smp.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-smp.c
+@@ -0,0 +1,217 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* PXA986/988 bring-up, following Marvell reset-pxa988.c (2012). */
++#include <linux/delay.h>
++#include <linux/iopoll.h>
++#include <linux/platform_device.h>
++#include <linux/sysfs.h>
++#include <linux/genalloc.h>
++#include <linux/of.h>
++#include <asm/cacheflush.h>
++#include <asm/cp15.h>
++#include <asm/proc-fns.h>
++#include <linux/io.h>
++#include <linux/smp.h>
++#include <linux/sizes.h>
++#include <asm/memory.h>
++#include <asm/smp.h>
++#include <asm/smp_scu.h>
++#include "addr-map.h"
++
++static void __iomem *t110_scu;
++static u32 core1_saved;
++static void __iomem *sleep_mc;
++static void __iomem *sleep_trace;
++static unsigned int ddr_level;
++static bool sleep_gating;
++static bool display_gating;
++static bool standby_request;
++static bool l2_quiesce;
++static bool sram_probe_enabled;
++static phys_addr_t sram_probe_phys;
++extern char t110_sram_probe[],t110_sram_probe_end[],t110_sram_target[];
++static bool core1_off;
++
++static void __init pxa98x_prepare_cpus(unsigned int max_cpus)
++{
++	void __iomem *scu = ioremap(0xd1dfe000, SZ_256);
++	if (!scu) panic("PXA98x: cannot map SCU");
++	pr_info("T110_SMP_C: SCU cores=%u control=%08x CC2_AP=%08x\n",
++		scu_get_core_count(scu), readl(scu), readl(APMU_REG(0x100)));
++	scu_enable(scu);
++	t110_scu = scu;
++}
++
++static int pxa98x_boot_secondary(unsigned int cpu, struct task_struct *idle)
++{
++	u32 reset, entry = __pa_symbol(secondary_startup);
++	if (cpu != 1) return -EINVAL;
++	if (core1_off) {
++		/* Restore the retained SCU CPU slot before the normal reset path. */
++		writeb(readb(t110_scu + 9) & ~3, t110_scu + 9);
++		writel(core1_saved, APMU_REG(0x128));
++		core1_off = false;
++		dsb(sy);
++	}
++	/* No TrustZone hypervisor on goyawifi. ROM reads this DDR entry. */
++	writel(entry, CIU_REG(0xd8));
++	readl(CIU_REG(0xd8));
++	dsb(sy);
++	reset = readl(APMU_REG(0x100));
++	pr_info("T110_SMP_C: CPU%u entry=%08x CC2_AP=%08x\n", cpu, entry, reset);
++	/* Reset CPU1 if the bootloader left it in an old holding pen. */
++	if (!(reset & BIT(20))) {
++		writel(reset | BIT(20), APMU_REG(0x100));
++		readl(APMU_REG(0x100));
++		udelay(10);
++	}
++	/* Vendor PXA988 core/debug/watchdog reset bits for CPU1. */
++	writel(reset & ~(BIT(20) | BIT(22) | BIT(23)), APMU_REG(0x100));
++	readl(APMU_REG(0x100));
++	writel(BIT(1), APMU_REG(0x12c));
++	dsb(sy);
++	return 0;
++}
++
++static void pxa98x_secondary_init(unsigned int cpu)
++{
++	pr_info("T110_SMP_C: CPU%u reached secondary init\n", cpu);
++}
++
++#ifdef CONFIG_HOTPLUG_CPU
++static int pxa98x_cpu_disable(unsigned int cpu)
++{
++	return cpu == 1 ? 0 : -EPERM;
++}
++static void pxa98x_cpu_die(unsigned int cpu)
++{
++	/* CPU0 and PL310 remain running. No MP/SCU or DDR shutdown here. */
++	core1_saved = readl(APMU_REG(0x128));
++	core1_off = true;
++	smp_wmb();
++	writel(core1_saved | 0x1f, APMU_REG(0x128));
++	/* Use the ARMv7 local-cache/coherency shutdown sequence. */
++	v7_exit_coherency_flush(louis);
++	scu_power_mode(t110_scu, SCU_PM_POWEROFF);
++	while (1)
++		cpu_do_idle();
++}
++static int pxa98x_cpu_kill(unsigned int cpu)
++{
++	u32 status;
++	int ret = readl_poll_timeout_atomic(APMU_REG(0x90), status,
++					  status & BIT(7), 10, 100000);
++	pr_info("t110-sleep: CPU1 off status=%08x rc=%d\n", status, ret);
++	return ret == 0;
++}
++#endif
++
++#include "t110-sleep.h"
++static ssize_t level_show(struct device *dev,struct device_attribute *a,char *buf)
++{ return sysfs_emit(buf,"%u\n",READ_ONCE(ddr_level)); }
++static ssize_t level_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{ unsigned int v;int ret=kstrtouint(buf,0,&v);if(ret)return ret;if(v>3)return -EINVAL;WRITE_ONCE(ddr_level,v);return len; }
++static DEVICE_ATTR_RW(level);
++static ssize_t state_show(struct device *dev, struct device_attribute *a, char *buf)
++{
++	return sysfs_emit(buf,
++		"cpu0_resumes=%u cpu0_aborts=%u ddr_level=%u ddr_cycles=%u mc_ctrl=%08x mc_status=%08x last_awucrs=%08x core_status=%08x core0=%08x core1=%08x mp0=%08x mp1=%08x apcr=%08x awucrm=%08x awucrs=%08x scu=%08x scu_power=%08x cpcr=%08x mc_sleep=%08x pwr_timer=%08x\n",
++		cpu0_resumes,cpu0_aborts,ddr_level,ddr_cycles,readl(sleep_mc+0x440),readl(sleep_mc+8),last_awucrs,readl(APMU_REG(0x90)), readl(APMU_REG(0x124)),
++		readl(APMU_REG(0x128)), readl(APMU_REG(0x120)),
++		readl(APMU_REG(0xe4)), readl(MPMU_REG(0x1000)),
++		readl(MPMU_REG(0x104c)), readl(MPMU_REG(0x1048)),
++		readl(t110_scu), readl(t110_scu+8),readl(MPMU_REG(0)),readl(APMU_REG(0xb0)),readl(APMU_REG(0x84)));
++}
++static DEVICE_ATTR_RO(state);
++static ssize_t trace_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ return sysfs_emit(buf,"magic=%08x level=%u stage=%u resume_scu=%08x resume_l2=%08x icu_pmic=%08x icu_mask=%08x cpu1_arrived=%u apsr=%08x cpsr=%08x aprr=%08x mc_req_ap=%08x mc_req_cp=%08x mc_req_msa=%08x\n",
++ readl(sleep_trace),readl(sleep_trace+4),readl(sleep_trace+8),readl(sleep_trace+0x10),readl(sleep_trace+0x14),readl(sleep_trace+0x18),readl(sleep_trace+0x1c),readl(sleep_trace+0x40),readl(MPMU_REG(0x1004)),readl(MPMU_REG(4)),readl(MPMU_REG(0x1020)),readl(APMU_REG(0xb4)),readl(APMU_REG(0xb8)),readl(APMU_REG(0xbc)));
++}
++static DEVICE_ATTR_RO(trace);
++static ssize_t gating_show(struct device *dev,struct device_attribute *a,char *buf)
++{return sysfs_emit(buf,"%u\n",READ_ONCE(sleep_gating));}
++static ssize_t gating_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{bool v;int ret=kstrtobool(buf,&v);if(ret)return ret;WRITE_ONCE(sleep_gating,v);return len;}
++static DEVICE_ATTR_RW(gating);
++static ssize_t display_gating_show(struct device *dev,struct device_attribute *a,char *buf)
++{return sysfs_emit(buf,"enabled=%u entry_lcd=%08x entry_dsi=%08x entry_usb=%08x\n",READ_ONCE(display_gating),readl(sleep_trace+0xa0),readl(sleep_trace+0xa4),readl(sleep_trace+0xa8));}
++static ssize_t display_gating_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{bool v;int ret=kstrtobool(buf,&v);if(ret)return ret;WRITE_ONCE(display_gating,v);return len;}
++static DEVICE_ATTR_RW(display_gating);
++static ssize_t standby_request_show(struct device *dev,struct device_attribute *a,char *buf)
++{return sysfs_emit(buf,"%u\n",READ_ONCE(standby_request));}
++static ssize_t standby_request_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{bool v;int ret=kstrtobool(buf,&v);if(ret)return ret;WRITE_ONCE(standby_request,v);return len;}
++static DEVICE_ATTR_RW(standby_request);
++static ssize_t l2_quiesce_show(struct device *dev,struct device_attribute *a,char *buf)
++{return sysfs_emit(buf,"%u\n",READ_ONCE(l2_quiesce));}
++static ssize_t l2_quiesce_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{bool v;int ret=kstrtobool(buf,&v);if(ret)return ret;WRITE_ONCE(l2_quiesce,v);return len;}
++static DEVICE_ATTR_RW(l2_quiesce);
++static ssize_t clocks_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ return sysfs_emit(buf,"ciu_mc=%08x apmu_debug=%08x idle_cfg=%08x sp_idle_cfg=%08x cpcr=%08x cprr=%08x apsr=%08x cpsr=%08x mc_status=%08x mc_dram=%08x mc_hw=%08x mc_sw=%08x mck4=%08x sleep_gating=%u counters=%08x/%08x/%08x/%08x pre_ciu=%08x used_ciu=%08x\n",
++ readl(CIU_REG(0x40)),readl(APMU_REG(0x88)),readl(APMU_REG(0x18)),readl(APMU_REG(0x14)),readl(MPMU_REG(0)),readl(MPMU_REG(0x20)),readl(MPMU_REG(0x1004)),readl(MPMU_REG(4)),readl(sleep_mc+4),readl(sleep_mc+8),readl(APMU_REG(0xb0)),readl(APMU_REG(0xc0)),readl(APMU_REG(0xe8)),READ_ONCE(sleep_gating),readl(sleep_mc+0x450),readl(sleep_mc+0x454),readl(sleep_mc+0x458),readl(sleep_mc+0x45c),readl(sleep_trace+0x80),readl(sleep_trace+0x84));
++}
++static DEVICE_ATTR_RO(clocks);
++static ssize_t activity_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ void __iomem *lcd=ioremap(0xd420b000,SZ_4K);u32 pn=~0,tv=~0,pn2=~0;
++ if(lcd){pn=readl(lcd+0x190);tv=readl(lcd+0x80);pn2=readl(lcd+0x2c8);iounmap(lcd);}
++ return sysfs_emit(buf,"sleep_total=%u sleep_dpc_idle=%u sleep_rw_commands=%u sleep_no_util=%u lcd_dma=%08x/%08x/%08x usb=%08x lcd_clk=%08x dsi_clk=%08x vpu=%08x dma=%08x squ=%08x sdh=%08x/%08x/%08x\n",ddr_cycles,ddr_idle_cycles,ddr_commands,ddr_no_util,pn,tv,pn2,readl(APMU_REG(0x5c)),readl(APMU_REG(0x4c)),readl(APMU_REG(0x44)),readl(APMU_REG(0xa4)),readl(APMU_REG(0x64)),readl(APMU_REG(0x1c)),readl(APMU_REG(0x54)),readl(APMU_REG(0x58)),readl(APMU_REG(0xe0)));
++}
++static DEVICE_ATTR_RO(activity);
++static ssize_t sram_probe_show(struct device *dev,struct device_attribute *a,char *buf)
++{return sysfs_emit(buf,"enabled=%u phys=%08x ran=%u dram=%08x mc_status=%08x\n",sram_probe_enabled,(u32)sram_probe_phys,readl(sleep_trace+0x98),readl(sleep_trace+0x90),readl(sleep_trace+0x94));}
++static ssize_t sram_probe_store(struct device *dev,struct device_attribute *a,const char *buf,size_t len)
++{bool v;int ret=kstrtobool(buf,&v);if(ret)return ret;if(v&&!sram_probe_phys)return -ENODEV;WRITE_ONCE(sram_probe_enabled,v);return len;}
++static DEVICE_ATTR_RW(sram_probe);
++static struct attribute *sleep_attrs[] = { &dev_attr_state.attr, &dev_attr_level.attr, &dev_attr_trace.attr, &dev_attr_gating.attr, &dev_attr_display_gating.attr, &dev_attr_standby_request.attr, &dev_attr_l2_quiesce.attr, &dev_attr_clocks.attr, &dev_attr_activity.attr, &dev_attr_sram_probe.attr, NULL };
++ATTRIBUTE_GROUPS(sleep);
++static int __init pxa98x_sleep_diag_init(void)
++{
++	struct platform_device *dev;
++	int ret;
++	if (!t110_scu) return -ENODEV;
++	sleep_mc=ioremap(0xc0100000,0x1000);
++	if (!sleep_mc) return -ENOMEM;
++ /* A dedicated page after the vendor's 256KiB RAM console, within the
++  * already-reserved diagnostics carveout; not part of its data or ECC. */
++ sleep_trace=ioremap(0x08140000,SZ_4K);
++ if(!sleep_trace)return -ENOMEM;
++ pr_info("t110-sleep: previous trace magic=%08x level=%u stage=%u\n",readl(sleep_trace),readl(sleep_trace+4),readl(sleep_trace+8));
++	dev = platform_device_register_simple("t110-sleep", -1, NULL, 0);
++	if (IS_ERR(dev)) return PTR_ERR(dev);
++	suspend_set_ops(&t110_suspend_ops);
++	ret = device_add_groups(&dev->dev, sleep_groups);
++	if (ret) platform_device_unregister(dev);
++	return ret;
++}
++device_initcall(pxa98x_sleep_diag_init);
++static int __init t110_sleep_sram_init(void)
++{
++ struct device_node *np=of_find_node_by_path("/audio@d42a0c00");
++ struct gen_pool *pool;void *dst;dma_addr_t phys;size_t n=t110_sram_probe_end-t110_sram_probe;
++ if(!np)return -ENODEV;
++ pool=of_gen_pool_get(np,"asram",0);of_node_put(np);
++ if(!pool)return -ENODEV;
++ dst=gen_pool_dma_alloc(pool,n,&phys);if(!dst)return -ENOMEM;
++ memcpy_toio((void __iomem *)dst,t110_sram_probe,n);
++ writel(__pa_symbol(t110_cpu_resume),(void __iomem *)dst+(t110_sram_target-t110_sram_probe));
++ dsb(sy);sram_probe_phys=phys;
++ pr_info("t110-sleep: SRAM rank probe phys=%08x bytes=%zu\n",(u32)phys,n);
++ return 0;
++}
++late_initcall(t110_sleep_sram_init);
++
++static const struct smp_operations pxa98x_smp_ops __initconst = {
++	.smp_prepare_cpus = pxa98x_prepare_cpus,
++	.smp_boot_secondary = pxa98x_boot_secondary,
++	.smp_secondary_init = pxa98x_secondary_init,
++#ifdef CONFIG_HOTPLUG_CPU
++	.cpu_disable = pxa98x_cpu_disable,
++	.cpu_die = pxa98x_cpu_die,
++	.cpu_kill = pxa98x_cpu_kill,
++#endif
++};
++CPU_METHOD_OF_DECLARE(pxa98x_smp, "marvell,pxa986-smp", &pxa98x_smp_ops);
+diff --git a/arch/arm/mach-mmp/pxa98x-thermal.c b/arch/arm/mach-mmp/pxa98x-thermal.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-thermal.c
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* PXA986 polling-only high-range sensor. Code zero means <=80C. */
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/thermal.h>
++struct t110_thermal {void __iomem *regs;struct mutex lock;};
++static int t110_get_temp(struct thermal_zone_device *zone,int *temp)
++{
++ struct t110_thermal *t=thermal_zone_device_priv(zone);
++ u32 raw,ctrl,gray,binary;int i,ret=0;
++ mutex_lock(&t->lock);
++ for(i=0;i<10;i++) {
++  raw=readl(t->regs+0x24);
++  if(raw&BIT(4))break;
++  msleep(20);
++ }
++ if(i==10){ret=-EAGAIN;goto out;}
++ gray=raw&15;binary=gray^(gray>>1)^(gray>>2)^(gray>>3);
++ *temp=80000+binary*2500;
++ ctrl=readl(t->regs+0x20);
++ writel(ctrl&~BIT(3),t->regs+0x20);
++ writel(ctrl|BIT(3),t->regs+0x20);
++out:
++ mutex_unlock(&t->lock);return ret;
++}
++static const struct thermal_zone_device_ops t110_thermal_ops={.get_temp=t110_get_temp};
++static ssize_t measurement_range_show(struct device *dev,struct device_attribute *attr,char *buf)
++{return sysfs_emit(buf,"80000 117500 millicelsius; 80000 means at or below sensor floor\n");}
++static DEVICE_ATTR_RO(measurement_range);
++static struct attribute *t110_attrs[]={&dev_attr_measurement_range.attr,NULL};
++ATTRIBUTE_GROUPS(t110);
++static int t110_thermal_probe(struct platform_device *pdev)
++{
++ struct t110_thermal *t;struct thermal_zone_device *zone;u32 ctrl;
++ t=devm_kzalloc(&pdev->dev,sizeof(*t),GFP_KERNEL);if(!t)return -ENOMEM;
++ mutex_init(&t->lock);
++ t->regs=devm_platform_ioremap_resource(pdev,0);if(IS_ERR(t->regs))return PTR_ERR(t->regs);
++ /* Match PXA986's vendor polling path, retaining over-range reset state. */
++ ctrl=readl(t->regs+0x20);
++ ctrl&=~(BIT(29)|BIT(25)|BIT(18)|BIT(3)|BIT(2)|BIT(1));
++ ctrl|=BIT(0);writel(ctrl,t->regs+0x20);
++ /* Vendor documented reset settling interval; no busy-wait or deep idle. */
++ msleep(2000);
++ writel(ctrl|BIT(2)|BIT(3),t->regs+0x20);
++ zone=devm_thermal_of_zone_register(&pdev->dev,0,t,&t110_thermal_ops);
++ if(IS_ERR(zone))return PTR_ERR(zone);
++ dev_info(&pdev->dev,"PXA986 hot-range thermal polling; 80C floor, 2.5C steps\n");
++ return 0;
++}
++static const struct of_device_id t110_thermal_match[]={{.compatible="samsung,t110-pxa986-thermal"},{}};
++MODULE_DEVICE_TABLE(of,t110_thermal_match);
++static struct platform_driver t110_thermal_driver={.probe=t110_thermal_probe,.driver={.name="t110-pxa986-thermal",.of_match_table=t110_thermal_match,.dev_groups=t110_groups}};
++module_platform_driver(t110_thermal_driver);
++MODULE_LICENSE("GPL");
+diff --git a/arch/arm/mach-mmp/pxa98x-usb.c b/arch/arm/mach-mmp/pxa98x-usb.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/pxa98x-usb.c
+@@ -0,0 +1,186 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* PXA986/PXA988 USB device glue; PHY sequence from Samsung's goyawifi kernel. */
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/usb/chipidea.h>
++
++struct pxa98x_usb {
++	void __iomem *phy_base;
++	void __iomem *clock;
++	struct platform_device *ci;
++	u32 sleep_clock;
++	bool clock_sleep;
++};
++
++static int pxa98x_phy_init(struct phy *phy)
++{
++	struct pxa98x_usb *usb = phy_get_drvdata(phy);
++	void __iomem *base = usb->phy_base;
++	u16 value;
++	int ret;
++	/* Exact GOYA values; this is the PXA98x 16-bit PHY register layout. */
++	static const struct { u16 offset, value; } regs[] = {
++		{0x04, 0x5af0}, /* PLLVDD18=1, REFDIV=13, FBDIV=240 */
++		{0x08, 0x3133}, /* PU_PLL, LOCK_BYPASS, ICP=1, KVCO=3, CAL12=3 */
++		{0x10, 0x0188}, /* IMPCAL_VTH=1, HS/FS_RCAL=8 */
++		{0x14, 0x07d4}, /* TXVDD15=1, TXVDD12=3, LOWVDD, AMP=5, PHSEL=4 */
++		{0x18, 0x0aff}, /* SLEWRATE=2, CAL_DLY=2, FS/HS_DRV=15 */
++		{0x20, 0xaac1}, /* GOYA SQ_THRESH=12 */
++		{0x24, 0x3892},
++		{0x28, 0x0105},
++		{0x30, 0x0110},
++		{0x34, 0x5680},
++		{0x3c, 0x2586},
++		{0x40, 0xe400},
++		{0x58, 0x0000},
++	};
++	unsigned int i;
++	writel(0x10901003, base + 0x104);
++	for (i = 0; i < ARRAY_SIZE(regs); i++)
++		writew(regs[i].value, base + regs[i].offset);
++	ret = readw_poll_timeout(base + 0x08, value, value & BIT(15),
++				10, 200000);
++	dev_info(&phy->dev, "PXA98x PHY PLL=%04x power=%08x ready=%d\n",
++		 value, readl(base + 0x104), !ret);
++	/* Vendor initializes without requiring the PLL_READY status bit. */
++	return 0;
++}
++
++static int pxa98x_phy_exit(struct phy *phy)
++{
++	struct pxa98x_usb *usb = phy_get_drvdata(phy);
++	writew(readw(usb->phy_base + 0x08) & ~BIT(13), usb->phy_base + 0x08);
++	writew(readw(usb->phy_base + 0x34) & ~BIT(14), usb->phy_base + 0x34);
++	writel(0x10901000, usb->phy_base + 0x104);
++	return 0;
++}
++
++static const struct phy_ops pxa98x_phy_ops = {
++	.init = pxa98x_phy_init,
++	.exit = pxa98x_phy_exit,
++	.owner = THIS_MODULE,
++};
++
++static int pxa98x_usb_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct ci_hdrc_platform_data pdata = {
++		.name = "pxa98x-usb",
++		.capoffset = DEF_CAPOFFSET,
++		.phy_mode = USBPHY_INTERFACE_MODE_UTMI,
++		.dr_mode = USB_DR_MODE_PERIPHERAL,
++		.flags = CI_HDRC_DISABLE_STREAMING | CI_HDRC_REQUIRES_ALIGNED_DMA |
++			 CI_HDRC_DUAL_ROLE_NOT_OTG | CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS,
++	};
++	struct pxa98x_usb *usb;
++	struct resource resources[2];
++	struct resource *controller;
++	struct phy *phy;
++	int irq;
++
++	usb = devm_kzalloc(dev, sizeof(*usb), GFP_KERNEL);
++	if (!usb) return -ENOMEM;
++	usb->phy_base = devm_platform_ioremap_resource_byname(pdev, "phy");
++	if (IS_ERR(usb->phy_base)) return PTR_ERR(usb->phy_base);
++	usb->clock = devm_platform_ioremap_resource_byname(pdev, "clock");
++	if (IS_ERR(usb->clock)) return PTR_ERR(usb->clock);
++	/* Vendor UDCCLK: release AXI reset and enable the AXI clock. */
++	writel(0x9, usb->clock);
++	readl(usb->clock);
++	udelay(20);
++	phy = devm_phy_create(dev, NULL, &pxa98x_phy_ops);
++	if (IS_ERR(phy)) return PTR_ERR(phy);
++	phy_set_drvdata(phy, usb);
++	pdata.phy = phy;
++	controller = platform_get_resource_byname(pdev, IORESOURCE_MEM, "controller");
++	if (!controller) return -EINVAL;
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0) return irq;
++	resources[0] = *controller;
++	resources[1] = (struct resource) {
++		.start = irq, .end = irq, .flags = IORESOURCE_IRQ,
++	};
++	platform_set_drvdata(pdev, usb);
++	usb->ci = ci_hdrc_add_device(dev, resources, ARRAY_SIZE(resources), &pdata);
++	if (IS_ERR(usb->ci)) return PTR_ERR(usb->ci);
++	dev_info(dev, "PXA98x ChipIdea USB peripheral registered, IRQ %d\n", irq);
++	return 0;
++}
++
++static void pxa98x_usb_remove(struct platform_device *pdev)
++{
++	struct pxa98x_usb *usb = platform_get_drvdata(pdev);
++	ci_hdrc_remove_device(usb->ci);
++	writel(0, usb->clock);
++}
++
++/* Board diagnostic: child ChipIdea suspends first; preserve its register
++ * context and PHY, then gate only the AXI clock. Restore before child resume.
++ * The explicit test helper detaches the gadget before enabling this option.
++ * Default off until USB and DDR suspend behaviour has been validated. */
++static ssize_t clock_sleep_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct pxa98x_usb *usb = dev_get_drvdata(dev);
++	return sysfs_emit(buf, "%u\n", READ_ONCE(usb->clock_sleep));
++}
++static ssize_t clock_sleep_store(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t len)
++{
++	struct pxa98x_usb *usb = dev_get_drvdata(dev);
++	bool enable;
++	int ret = kstrtobool(buf, &enable);
++	if (ret)
++		return ret;
++	WRITE_ONCE(usb->clock_sleep, enable);
++	return len;
++}
++static DEVICE_ATTR_RW(clock_sleep);
++static struct attribute *pxa98x_usb_attrs[] = {
++	&dev_attr_clock_sleep.attr, NULL,
++};
++ATTRIBUTE_GROUPS(pxa98x_usb);
++
++static int pxa98x_usb_suspend_late(struct device *dev)
++{
++	struct pxa98x_usb *usb = dev_get_drvdata(dev);
++	usb->sleep_clock = readl(usb->clock);
++	if (READ_ONCE(usb->clock_sleep)) {
++		writel(usb->sleep_clock & ~BIT(3), usb->clock);
++		readl(usb->clock);
++		dev_info(dev, "suspend AXI clock gated, reset retained\n");
++	}
++	return 0;
++}
++static int pxa98x_usb_resume_early(struct device *dev)
++{
++	struct pxa98x_usb *usb = dev_get_drvdata(dev);
++	writel(usb->sleep_clock, usb->clock);
++	readl(usb->clock);
++	udelay(20);
++	return 0;
++}
++static const struct dev_pm_ops pxa98x_usb_pm = {
++	SET_LATE_SYSTEM_SLEEP_PM_OPS(pxa98x_usb_suspend_late,
++				     pxa98x_usb_resume_early)
++};
++
++static const struct of_device_id pxa98x_usb_match[] = {
++	{ .compatible = "marvell,pxa986-usb" }, {},
++};
++MODULE_DEVICE_TABLE(of, pxa98x_usb_match);
++static struct platform_driver pxa98x_usb_driver = {
++	.probe = pxa98x_usb_probe,
++	.remove = pxa98x_usb_remove,
++	.driver = { .name = "pxa98x-usb", .of_match_table = pxa98x_usb_match,
++		.pm = pm_sleep_ptr(&pxa98x_usb_pm),
++		.dev_groups = pxa98x_usb_groups },
++};
++module_platform_driver(pxa98x_usb_driver);
++MODULE_LICENSE("GPL");
+diff --git a/arch/arm/mach-mmp/t110-camera-clock.c b/arch/arm/mach-mmp/t110-camera-clock.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-camera-clock.c
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Board-scoped PXA986 CCIC clock gates; never gate the shared LCD bus. */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/clk-provider.h>
++#include <linux/of.h>
++#include <linux/io.h>
++#include <linux/delay.h>
++struct cam_clock {struct clk_hw hw;void __iomem *rst,*dbg,*lcd;};
++static int cam_prepare(struct clk_hw *hw) {
++ struct cam_clock *c=container_of(hw,struct cam_clock,hw);u32 v;
++ /* LCD/CCIC shared HCLK: release, retain for the display on disable. */
++ writel(readl(c->lcd)|BIT(5)|BIT(2),c->lcd);
++ v=readl(c->rst);
++ /* PLL1_624 source1 /2=312MHz; PHY slow52MHz /26. */
++ v&=~((3<<16)|(7<<18)|(31<<10)|BIT(7));
++ v|=BIT(16)|(2<<18)|(26<<10)|BIT(7);
++ writel(v|BIT(0)|BIT(3),c->rst);
++ writel(v|BIT(0)|BIT(3)|BIT(1)|BIT(4)|BIT(15),c->rst);
++ udelay(10);
++ writel(readl(c->rst)|BIT(2)|BIT(5)|BIT(8)|BIT(9),c->rst);
++ writel(readl(c->dbg)|0x06000000,c->dbg);udelay(10);
++ return 0;
++}
++static void cam_unprepare(struct clk_hw *hw) {
++ struct cam_clock *c=container_of(hw,struct cam_clock,hw);
++ writel(readl(c->rst)&~(BIT(3)|BIT(4)|BIT(5)|BIT(9)|BIT(2)),c->rst);
++ writel(readl(c->dbg)&~0x06000000,c->dbg);
++}
++static unsigned long cam_rate(struct clk_hw *hw,unsigned long parent){return 312000000;}
++static const struct clk_ops cam_ops={.prepare=cam_prepare,.unprepare=cam_unprepare,.recalc_rate=cam_rate};
++static int cam_clock_probe(struct platform_device *pdev) {
++ struct cam_clock *c;struct clk_init_data init={.name="t110-ccic",.ops=&cam_ops};int ret;
++ c=devm_kzalloc(&pdev->dev,sizeof(*c),GFP_KERNEL);if(!c)return -ENOMEM;
++ c->rst=devm_platform_ioremap_resource(pdev,0);if(IS_ERR(c->rst))return PTR_ERR(c->rst);
++ c->dbg=devm_platform_ioremap_resource(pdev,1);if(IS_ERR(c->dbg))return PTR_ERR(c->dbg);
++ c->lcd=devm_platform_ioremap_resource(pdev,2);if(IS_ERR(c->lcd))return PTR_ERR(c->lcd);
++ c->hw.init=&init;ret=devm_clk_hw_register(&pdev->dev,&c->hw);if(ret)return ret;
++ return devm_of_clk_add_hw_provider(&pdev->dev,of_clk_hw_simple_get,&c->hw);
++}
++static const struct of_device_id cam_clock_match[]={{.compatible="samsung,t110-camera-clock"},{}};
++MODULE_DEVICE_TABLE(of,cam_clock_match);
++static struct platform_driver cam_clock_driver={.probe=cam_clock_probe,.driver={.name="t110-camera-clock",.of_match_table=cam_clock_match}};
++module_platform_driver(cam_clock_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SM-T110 bounded CCIC clock gates");
+diff --git a/arch/arm/mach-mmp/t110-ecc.h b/arch/arm/mach-mmp/t110-ecc.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-ecc.h
+@@ -0,0 +1,41 @@
++/* RS(255,239), gfpoly=0x11d, fcr=0, prim=1; generated by make_ecc.py */
++static const unsigned char t110_alpha[] = {
++    1, 2, 4, 8, 16, 32, 64, 128, 29, 58, 116, 232, 205, 135, 19, 38,
++    76, 152, 45, 90, 180, 117, 234, 201, 143, 3, 6, 12, 24, 48, 96, 192,
++    157, 39, 78, 156, 37, 74, 148, 53, 106, 212, 181, 119, 238, 193, 159, 35,
++    70, 140, 5, 10, 20, 40, 80, 160, 93, 186, 105, 210, 185, 111, 222, 161,
++    95, 190, 97, 194, 153, 47, 94, 188, 101, 202, 137, 15, 30, 60, 120, 240,
++    253, 231, 211, 187, 107, 214, 177, 127, 254, 225, 223, 163, 91, 182, 113, 226,
++    217, 175, 67, 134, 17, 34, 68, 136, 13, 26, 52, 104, 208, 189, 103, 206,
++    129, 31, 62, 124, 248, 237, 199, 147, 59, 118, 236, 197, 151, 51, 102, 204,
++    133, 23, 46, 92, 184, 109, 218, 169, 79, 158, 33, 66, 132, 21, 42, 84,
++    168, 77, 154, 41, 82, 164, 85, 170, 73, 146, 57, 114, 228, 213, 183, 115,
++    230, 209, 191, 99, 198, 145, 63, 126, 252, 229, 215, 179, 123, 246, 241, 255,
++    227, 219, 171, 75, 150, 49, 98, 196, 149, 55, 110, 220, 165, 87, 174, 65,
++    130, 25, 50, 100, 200, 141, 7, 14, 28, 56, 112, 224, 221, 167, 83, 166,
++    81, 162, 89, 178, 121, 242, 249, 239, 195, 155, 43, 86, 172, 69, 138, 9,
++    18, 36, 72, 144, 61, 122, 244, 245, 247, 243, 251, 235, 203, 139, 11, 22,
++    44, 88, 176, 125, 250, 233, 207, 131, 27, 54, 108, 216, 173, 71, 142, 0,
++};
++static const unsigned char t110_index[] = {
++    255, 0, 1, 25, 2, 50, 26, 198, 3, 223, 51, 238, 27, 104, 199, 75,
++    4, 100, 224, 14, 52, 141, 239, 129, 28, 193, 105, 248, 200, 8, 76, 113,
++    5, 138, 101, 47, 225, 36, 15, 33, 53, 147, 142, 218, 240, 18, 130, 69,
++    29, 181, 194, 125, 106, 39, 249, 185, 201, 154, 9, 120, 77, 228, 114, 166,
++    6, 191, 139, 98, 102, 221, 48, 253, 226, 152, 37, 179, 16, 145, 34, 136,
++    54, 208, 148, 206, 143, 150, 219, 189, 241, 210, 19, 92, 131, 56, 70, 64,
++    30, 66, 182, 163, 195, 72, 126, 110, 107, 58, 40, 84, 250, 133, 186, 61,
++    202, 94, 155, 159, 10, 21, 121, 43, 78, 212, 229, 172, 115, 243, 167, 87,
++    7, 112, 192, 247, 140, 128, 99, 13, 103, 74, 222, 237, 49, 197, 254, 24,
++    227, 165, 153, 119, 38, 184, 180, 124, 17, 68, 146, 217, 35, 32, 137, 46,
++    55, 63, 209, 91, 149, 188, 207, 205, 144, 135, 151, 178, 220, 252, 190, 97,
++    242, 86, 211, 171, 20, 42, 93, 158, 132, 60, 57, 83, 71, 109, 65, 162,
++    31, 45, 67, 216, 183, 123, 164, 118, 196, 23, 73, 236, 127, 12, 111, 246,
++    108, 161, 59, 82, 41, 157, 85, 170, 251, 96, 134, 177, 187, 204, 62, 90,
++    203, 89, 95, 176, 156, 169, 160, 81, 11, 245, 22, 235, 122, 117, 44, 215,
++    79, 174, 213, 233, 230, 231, 173, 232, 116, 214, 244, 234, 168, 80, 88, 175,
++};
++static const unsigned char t110_gen[] = {
++    120, 225, 194, 182, 169, 147, 191, 91, 3, 76, 161, 102, 109, 107, 104, 120,
++    0,
++};
+diff --git a/arch/arm/mach-mmp/t110-fg-tables.h b/arch/arm/mach-mmp/t110-fg-tables.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-fg-tables.h
+@@ -0,0 +1,626 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* GOYA vendor battery resistance tables, pinned fb2f8b6. */
++static const int rtot_tm20_i0p15[] = {//GoldenVE battery, modified from 68 to 100
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
++3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000};
++
++static const int rtot_tm20_i0p3[] = {//GoldenVE battery, modified from 68 to 100
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500,
++2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500, 2500};
++
++static const int rtot_tm20_i0p5[] = {//GoldenVE battery
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
++2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000};
++/*
++static const int rtot_tm20_i0p5[] = {//GoldenVE battery
++10500, 10500, 10500, 10500, 10500, 10500, 10500, 10500, 10500, 10500,
++10500, 10500, 10500, 10500, 10500, 10500, 9600, 8790, 8060, 7390,
++6780, 6230, 5730, 5280, 4870, 4510, 4190, 3900, 3640, 3420,
++3220, 3040, 2880, 2790, 2650, 2540, 2460, 2380, 2320, 2270,
++2220, 2180, 2140, 2110, 2080, 2050, 2020, 2000, 1970, 1950,
++1930, 1920, 1900, 1890, 1870, 1860, 1860, 1850, 1850, 1850,
++1850, 1860, 1860, 1850, 1850, 1850, 1840, 1840, 1840, 1830,
++1820, 1810, 1800, 1810, 1820, 1840, 1850, 1860, 1860, 1850,
++1840, 1850, 1840, 1840, 1840, 1840, 1840, 1840, 1840, 1840,
++1840, 1840, 1840, 1840, 1840, 1840, 1840, 1840, 1840, 1840};
++*/
++static const int rtot_tm20_i0p7[] = {//GoldenVE battery
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500,
++1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
++
++static const int rtot_tm20_i1p0[] = {//GoldenVE battery, equal to 0.7
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300,
++1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300, 1300};
++
++static const int rtot_tm20_i1p5[] = {// da modificare, ottenuto con interpolazione
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100,
++1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100, 1100};
++
++static const int rtot_tm5_i0p15[] = {//GoldenVE battery, modified from 68 to 100.
++2200, 1000, 750, 650, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
++500, 500, 500, 500, 500, 500, 500, 500, 500, 500};
++
++static const int rtot_tm5_i0p3[] = {//GoldenVE battery, modified from 78 to 100
++2100, 950, 650, 500, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400};
++/*
++966, 950, 935, 920, 907, 893, 881, 869, 858, 847,
++837, 828, 819, 812, 805, 799, 794, 789, 785, 781,
++780, 778, 776, 777, 779, 783, 789, 802, 818, 835,
++851, 865, 873, 878, 881, 882, 880, 877, 866, 850,
++838, 834, 835, 841, 858, 880, 896, 895, 895, 895,
++895, 895, 895, 895, 895, 895, 895, 895, 895, 895,
++895, 895, 895, 895, 895, 895, 895, 895, 895, 895};*/
++
++static const int rtot_tm5_i0p5[] = {//GoldenVE battery
++1500, 900, 600, 500, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350,
++350, 350, 350, 350, 350, 350, 350, 350, 350, 350};
++
++static const int rtot_tm5_i0p7[] = {//GoldenVE battery
++1800, 800, 600, 500, 400, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
++300, 300, 300, 300, 300, 300, 300, 300, 300, 300};
++
++static const int rtot_tm5_i1p0[] = {//GoldenVE battery
++1300, 700, 500, 350, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250};
++
++static const int rtot_tm5_i1p5[] = {
++1250, 700, 500, 300, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250,
++250, 250, 250, 250, 250, 250, 250, 250, 250, 250};
++
++
++static const int rtot_tm5_i0p3c[] = {//GoldenVE battery
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600};
++
++static const int rtot_tm5_i0p5c[] = {//GoldenVE battery
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600};
++
++static const int rtot_tm5_i0p7c[] = {
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600};
++
++static const int rtot_tm5_i1p0c[] = {
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600,
++600, 600, 600, 600, 600, 600, 600, 600, 600, 600};
++
++static const int rtot_t10_i0p15[] = {//GoldenVE battery, modified from 73 t0 100
++1100, 800, 400, 367, 347, 337, 337, 337, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327,
++327, 327, 327, 327, 327, 327, 327, 327, 327, 327};
++
++static const int rtot_t10_i0p3[] = {//GoldenVE battery, modified from 78 to 100
++1200, 750, 400, 342, 332, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230};
++
++static const int rtot_t10_i0p5[] = {//GoldenVE battery, modified from 78 to 100
++1200, 650, 350, 242, 232, 200, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
++180, 180, 180, 180, 180, 180, 180, 180, 180, 180};
++
++static const int rtot_t10_i0p7[] = {//GoldenVE battery
++1200, 500, 350, 200, 200, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170,
++170, 170, 170, 170, 170, 170, 170, 170, 170, 170};
++
++static const int rtot_t10_i1p0[] = {//GoldenVE battery
++1200, 450, 230, 180, 180, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150};
++
++static const int rtot_t10_i1p5[] = {
++1200, 450, 230, 180, 180, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150};
++
++
++
++
++
++
++static const int rtot_t10_i0p3c[] = {//GoldenVE battery
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400};
++
++static const int rtot_t10_i0p5c[] = {//GoldenVE battery
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400};
++
++
++static const int rtot_t10_i0p7c[] = {//GoldenVE battery
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400};
++
++static const int rtot_t10_i1p0c[] = {//GoldenVE battery
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400,
++400, 400, 400, 400, 400, 400, 400, 400, 400, 400};
++
++
++
++static const int rtot_t25_i0p15[] = {//Goya battery
++850, 750, 650, 550, 500, 450, 400, 350, 300, 250,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++//179, 176, 195, 230, 250, 236, 218, 214, 216, 214,
++//206, 195, 186, 182, 183, 190, 195, 197, 196, 194,
++//194, 193, 191, 187, 184, 182, 180, 180, 179, 179,
++//179, 181, 182, 182, 184, 187, 188, 190, 192, 194,
++//196, 198, 200, 204, 208, 213, 219, 226, 236, 249,
++//264, 282, 298, 306, 303, 297, 286, 277, 270, 265,
++//263, 262, 265, 270, 273, 272, 269, 265, 264, 266,
++//269, 271, 272, 273, 273, 273, 275, 276, 276, 277,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230};
++//277, 278, 280, 281, 280, 280, 280, 280, 283, 140};
++
++static const int rtot_t25_i0p3[] = {//Goya battery
++650, 550, 450, 400, 350, 300, 280, 250, 200, 171,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151,
++151, 151, 151, 151, 151, 151, 151, 151, 151, 151};
++//192, 191, 192, 192, 192, 192, 192, 191, 192, 95};
++
++static const int rtot_t25_i0p5[] = {//Goya battery
++550, 450, 400, 360, 330, 280, 250, 220, 180, 150,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130,
++130, 130, 130, 130, 130, 130, 130, 130, 130, 130};
++//164, 164, 164, 164, 163, 163, 162, 162, 162, 80};
++
++static const int rtot_t25_i0p7[] = {//Goya battery
++550, 450, 400, 360, 330, 280, 250, 220, 180, 150,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120};
++//150, 150, 150, 150, 149, 149, 149, 149, 149, 75};
++
++static const int rtot_t25_i1p0[] = { //Goya battery
++550, 450, 400, 360, 330, 280, 250, 220, 180, 150,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
++//140, 139, 139, 139, 139, 139, 139, 139, 139, 70};
++
++
++static const int rtot_t25_i1p5[] = {//Goya battery
++671, 671, 410, 321, 276, 246, 236, 180, 140, 110,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90};
++//133, 133, 133, 133, 133, 133, 133, 133, 133, 65};
++
++
++static const int rtot_t25_i0p3c[] = { //GoldenVE battery
++215, 215, 215, 215, 215, 215, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220};
++
++static const int rtot_t25_i0p5c[] = {//GoldenVE battery
++214, 214, 214, 214, 214, 214, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220,
++220, 220, 220, 220, 220, 220, 220, 220, 220, 220};
++
++static const int rtot_t25_i0p7c[] = {//GoldenVE battery
++218, 218, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150};
++
++static const int rtot_t25_i1p0c[] = {//GoldenVE battery
++204, 204, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110};
++
++static const int rtot_t40_i0p15[] = {//Goya battery = 25
++850, 750, 650, 550, 500, 450, 400, 350, 300, 250,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230,
++230, 230, 230, 230, 230, 230, 230, 230, 230, 230};
++//277, 278, 280, 281, 280, 280, 280, 280, 283, 140};
++
++static const int rtot_t40_i0p3[] = {//Goya battery
++650, 550, 450, 400, 350, 300, 280, 250, 200, 171,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140,
++140, 140, 140, 140, 140, 140, 140, 140, 140, 140};
++//182, 182, 183, 184, 184, 185, 186, 186, 187, 95};
++
++
++static const int rtot_t40_i0p5[] = {//Goya battery  not charact
++650, 550, 450, 400, 330, 300, 260, 230, 190, 131,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 140,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
++120, 120, 120, 120, 120, 120, 120, 120, 120, 120};
++
++
++static const int rtot_t40_i0p7[] = {//Goya battery
++550, 450, 400, 350, 300, 260, 230, 210, 150, 111,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
++100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
++//136, 136, 136, 136, 136, 136, 136, 136, 136, 70};
++
++static const int rtot_t40_i1p0[] = { //Goya battery
++450, 400, 350, 300, 265, 255, 230, 180, 140, 110,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99};
++//126, 125, 125, 125, 125, 125, 125, 125, 125, 62};
++
++static const int rtot_t40_i1p5[] = {//Goya battery
++852, 852, 405, 313, 265, 255, 230, 180, 140, 110,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 90,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99,
++90, 90, 90, 90, 90, 90, 90, 90, 90, 99};
++
++
++static const int rtot_t40_i0p3c[] = { //GoldenVE battery
++362, 362, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200};
++
++static const int rtot_t40_i0p5c[] = { //GoldenVE battery
++362, 362, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
++200, 200, 200, 200, 200, 200, 200, 200, 200, 200};
++
++
++static const int rtot_t40_i0p7c[] = { //GoldenVE battery
++218, 218, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150,
++150, 150, 150, 150, 150, 150, 150, 150, 150, 150};
++
++static const int rtot_t40_i1p0c[] = { //GoldenVE battery
++204, 204, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110,
++110, 110, 110, 110, 110, 110, 110, 110, 110, 110};
++
++static const int * const dis_chg_rtot[6][5] = {
++	{rtot_tm20_i0p15,  rtot_tm5_i0p15,  rtot_t10_i0p15,  rtot_t25_i0p15,  rtot_t40_i0p15},
++	{rtot_tm20_i0p3,  rtot_tm5_i0p3,  rtot_t10_i0p3,  rtot_t25_i0p3,  rtot_t40_i0p3},
++	{rtot_tm20_i0p5,  rtot_tm5_i0p5,  rtot_t10_i0p5,  rtot_t25_i0p5,  rtot_t40_i0p5},
++	{rtot_tm20_i0p7,  rtot_tm5_i0p7,  rtot_t10_i0p7,  rtot_t25_i0p7,  rtot_t40_i0p7},
++	{rtot_tm20_i1p0,  rtot_tm5_i1p0,  rtot_t10_i1p0,  rtot_t25_i1p0,  rtot_t40_i1p0},
++	{rtot_tm20_i1p5,  rtot_tm5_i1p5,  rtot_t10_i1p5,  rtot_t25_i1p5,  rtot_t40_i1p5}
++};
++
++static const int dischg_ib[6] = {150, 300, 500, 700, 1000, 1500};
++
++static const int * const chg_rtot[4][4] = {
++	{rtot_tm5_i0p3c,  rtot_t10_i0p3c,  rtot_t25_i0p3c,  rtot_t40_i0p3c},
++	{rtot_tm5_i0p5c,  rtot_t10_i0p5c,  rtot_t25_i0p5c,  rtot_t40_i0p5c},
++	{rtot_tm5_i0p7c,  rtot_t10_i0p7c,  rtot_t25_i0p7c,  rtot_t40_i0p7c},
++	{rtot_tm5_i1p0c,  rtot_t10_i1p0c,  rtot_t25_i1p0c,  rtot_t40_i1p0c}
++};
++
++static const int chg_ib[4] = {300,500,700, 1000};
+diff --git a/arch/arm/mach-mmp/t110-fuel-model.h b/arch/arm/mach-mmp/t110-fuel-model.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-fuel-model.h
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* GOYA vendor two-RC software fuel model, rewritten with bounded 64-bit
++ * arithmetic. Current is inferred from the electrical model, NOT measured.
++ * 3600mAh design capacity, C1=1000F, C2=10000F, offset resistance32mOhm.
++ */
++#ifndef T110_FUEL_MODEL_H
++#define T110_FUEL_MODEL_H
++#ifdef __KERNEL__
++#include <linux/math64.h>
++static inline long long fg_div(long long n,int d){return div_s64(n,d);}
++#else
++static inline long long fg_div(long long n,int d){return n/d;}
++#endif
++#include "t110-ocv.h"
++#include "t110-fg-tables.h"
++struct t110_fuel_model {
++ long long soc; /* micro-percent,0..100000000 */
++ int v1_uv,v2_uv,rs_mohm,rp_mohm,current_ua;
++};
++static inline int fg_clamp(int value,int low,int high)
++{return value<low?low:value>high?high:value;}
++static inline int fg_lerp(int a,int b,int x,int x0,int x1)
++{return a+(b-a)*(x-x0)/(x1-x0);}
++static inline int fg_rtot(int charging,int current_ma,int temp_deci,int soc)
++{
++ int i,j,n=charging?4:6,nt=charging?4:5;
++ int t0=charging?-50:-200,a,b;
++ const int *bins=charging?chg_ib:dischg_ib;
++ int index=fg_clamp(soc,0,99);
++ current_ma=fg_clamp(current_ma,bins[0],bins[n-1]);
++ temp_deci=fg_clamp(temp_deci,t0,t0+(nt-1)*150);
++ for(i=1;i<n-1&&current_ma>bins[i];i++);
++ for(j=1;j<nt-1&&temp_deci>t0+j*150;j++);
++ if(charging) {
++  a=fg_lerp(chg_rtot[i-1][j-1][index],chg_rtot[i][j-1][index],current_ma,bins[i-1],bins[i]);
++  b=fg_lerp(chg_rtot[i-1][j][index],chg_rtot[i][j][index],current_ma,bins[i-1],bins[i]);
++ }else{
++  a=fg_lerp(dis_chg_rtot[i-1][j-1][index],dis_chg_rtot[i][j-1][index],current_ma,bins[i-1],bins[i]);
++  b=fg_lerp(dis_chg_rtot[i-1][j][index],dis_chg_rtot[i][j][index],current_ma,bins[i-1],bins[i]);
++ }
++ return fg_clamp(fg_lerp(a,b,temp_deci,t0+(j-1)*150,t0+j*150),30,6000);
++}
++static inline int fg_percent(const struct t110_fuel_model *m)
++{return fg_clamp(fg_div(m->soc+500000,1000000),0,100);}
++static inline void fg_seed(struct t110_fuel_model *m,int percent,int v1_uv,int v2_uv)
++{
++ m->soc=(long long)fg_clamp(percent,0,100)*1000000;
++ m->v1_uv=v1_uv;m->v2_uv=v2_uv;m->rs_mohm=120;m->rp_mohm=40;m->current_ua=0;
++}
++static inline void fg_step(struct t110_fuel_model *m,int voltage_uv,int temp_deci,int elapsed_ms,int full)
++{
++ int percent=fg_div(m->soc,1000000),ocv_uv,rtot,ib_ua,dt;
++ if(percent>=100)ocv_uv=t110_ocv[100]*1000;
++ else ocv_uv=t110_ocv[percent]*1000+fg_div((long long)(t110_ocv[percent+1]-t110_ocv[percent])*(m->soc-(long long)percent*1000000),1000);
++ ib_ua=fg_div((long long)(ocv_uv-voltage_uv-m->v1_uv-m->v2_uv)*1000,m->rs_mohm);
++ ib_ua=fg_clamp(ib_ua,-3000000,3000000);
++ /* Choose charge/discharge resistance by modeled net ib_ua sign:
++  * a USB-connected tablet can still draw from its battery under load. */
++ rtot=fg_rtot(ib_ua<0,ib_ua<0?-ib_ua/1000:ib_ua/1000,temp_deci,percent);
++ m->rp_mohm=rtot/3;m->rs_mohm=rtot/3+32;
++ dt=fg_clamp(elapsed_ms,0,5000);
++ m->v1_uv+=fg_div((fg_div((long long)ib_ua*m->rp_mohm,1000)-m->v1_uv)*dt,1000*m->rp_mohm);
++ m->v2_uv+=fg_div((fg_div((long long)ib_ua*m->rp_mohm,1000)-m->v2_uv)*dt,10000*m->rp_mohm);
++ m->soc-=fg_div((long long)ib_ua*dt*100,12960000);
++ if(m->soc<0)m->soc=0;
++ if(m->soc>100000000)m->soc=100000000;
++ if(full&&voltage_uv>=4250000)m->soc=100000000;
++ m->current_ua=ib_ua;
++}
++#endif
+diff --git a/arch/arm/mach-mmp/t110-ntc.h b/arch/arm/mach-mmp/t110-ntc.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-ntc.h
+@@ -0,0 +1,13 @@
++/* GOYA vendor NTC table: -25 through +65 C, resistance in 0.1 ohm. */
++static const int t110_ntc[] = {
++1926293, 1831332, 1741659, 1656946, 1576891, 1501207, 1429795, 1362219, 1298249, 1237673,
++1180290, 1125914, 1074369, 1025491, 979128, 935136, 893194, 853391, 815603, 779718,
++745628, 713233, 682439, 653159, 625308, 598810, 573672, 549729, 526920, 505183,
++484463, 464707, 445864, 427888, 410735, 394361, 378705, 363758, 349483, 335847,
++322818, 310365, 298460, 287077, 276188, 265772, 255819, 246284, 237149, 228393,
++220000, 211953, 204236, 196834, 189733, 182920, 176398, 170142, 164140, 158381,
++152854, 147547, 142452, 137558, 132857, 128340, 123985, 119798, 115771, 111898,
++108172, 104587, 101136, 97815, 94618, 91539, 88576, 85721, 82972, 80322,
++77769, 75308, 72935, 70648, 68442, 66314, 64292, 62342, 60461, 58646,
++56895
++};
+diff --git a/arch/arm/mach-mmp/t110-ocv.h b/arch/arm/mach-mmp/t110-ocv.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-ocv.h
+@@ -0,0 +1,2 @@
++/* GOYA vendor OCV curve, mV; voltage-only estimate, not coulomb counting. */
++static const int t110_ocv[]={3373,3474,3545,3598,3640,3670,3683,3688,3690,3692,3694,3696,3701,3708,3715,3719,3724,3729,3734,3738,3742,3745,3748,3751,3755,3759,3763,3767,3771,3774,3778,3782,3785,3788,3791,3794,3797,3800,3803,3806,3809,3813,3816,3820,3824,3828,3832,3836,3840,3845,3850,3854,3860,3865,3871,3877,3883,3890,3898,3906,3916,3926,3937,3948,3958,3967,3976,3984,3993,4001,4010,4018,4027,4037,4047,4056,4066,4075,4084,4094,4104,4114,4125,4135,4145,4156,4167,4177,4188,4199,4210,4221,4233,4244,4256,4267,4279,4291,4303,4316,4320};
+diff --git a/arch/arm/mach-mmp/t110-pm822-rtc.h b/arch/arm/mach-mmp/t110-pm822-rtc.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-pm822-rtc.h
+@@ -0,0 +1,128 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* PM822 counter/base and alarm layout verified against the pinned GOYA vendor driver. */
++#include <linux/rtc.h>
++#include <linux/interrupt.h>
++#include <linux/unaligned.h>
++#define T110_ONKEY_IRQ BIT(0)
++#define T110_RTC_IRQ BIT(4)
++#define T110_RTC_ACK (BIT(4) | BIT(5))
++static int t110_rtc_ctrl(struct t110_monitor *m, u8 set, u8 clear, u8 ack)
++{
++ unsigned int v; int ret=regmap_read(m->base,0xd0,&v);
++ if(ret)return ret;
++ return regmap_write(m->base,0xd0,((v & ~(T110_RTC_ACK | clear)) | set | ack));
++}
++static int t110_rtc_u32(struct t110_monitor *m, unsigned int reg, u32 *v)
++{
++ u8 b[4];int ret=regmap_bulk_read(m->base,reg,b,4);
++ if(!ret)
++  *v=get_unaligned_le32(b);
++ return ret;
++}
++static int t110_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);u32 base,count;int ret;
++ mutex_lock(&m->lock);
++ ret=t110_rtc_u32(m,0xea,&base);if(!ret)ret=t110_rtc_u32(m,0xd1,&count);
++ if(!ret)rtc_time64_to_tm((u32)(base+count),tm);
++ mutex_unlock(&m->lock);return ret;
++}
++static int t110_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);u32 count;u8 b[4];int ret;
++ mutex_lock(&m->lock);ret=t110_rtc_u32(m,0xd1,&count);
++ if(!ret){put_unaligned_le32((u32)rtc_tm_to_time64(tm)-count,b);ret=regmap_bulk_write(m->base,0xea,b,4);}
++ mutex_unlock(&m->lock);return ret;
++}
++static int t110_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *a)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);u32 base,alarm;unsigned int v;int ret;
++ mutex_lock(&m->lock);
++ ret=t110_rtc_u32(m,0xea,&base);if(!ret)ret=t110_rtc_u32(m,0xd5,&alarm);
++ if(!ret)ret=regmap_read(m->base,0xd0,&v);
++ if(!ret){rtc_time64_to_tm((u32)(base+alarm),&a->time);a->enabled=!!(v&1);a->pending=!!(v&T110_RTC_ACK);}
++ mutex_unlock(&m->lock);return ret;
++}
++static int t110_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *a)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);u32 base,count;u8 b[4];int ret;
++ time64_t when=rtc_tm_to_time64(&a->time);
++ mutex_lock(&m->lock);
++ ret=t110_rtc_u32(m,0xea,&base);if(!ret)ret=t110_rtc_u32(m,0xd1,&count);
++ if(!ret && a->enabled && when <= (u32)(base+count))ret=-ETIME;
++ if(!ret)ret=t110_rtc_ctrl(m,0,1,0);
++ if(!ret){put_unaligned_le32((u32)when-base,b);ret=regmap_bulk_write(m->base,0xd5,b,4);}
++ if(!ret)ret=regmap_write(m->base,5,T110_RTC_IRQ);
++ if(!ret)ret=t110_rtc_ctrl(m,a->enabled?1:0,1,T110_RTC_ACK);
++ mutex_unlock(&m->lock);return ret;
++}
++static int t110_rtc_alarm_enable(struct device *dev, unsigned int enable)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);int ret;
++ mutex_lock(&m->lock);ret=t110_rtc_ctrl(m,enable?1:0,1,0);mutex_unlock(&m->lock);return ret;
++}
++static const struct rtc_class_ops t110_rtc_ops={
++ .read_time=t110_rtc_read_time,.set_time=t110_rtc_set_time,
++ .read_alarm=t110_rtc_read_alarm,.set_alarm=t110_rtc_set_alarm,.alarm_irq_enable=t110_rtc_alarm_enable,
++};
++static irqreturn_t t110_pmic_irq(int irq, void *data)
++{
++ struct t110_monitor *m=data;unsigned int status;int ret;bool alarm=false;
++ mutex_lock(&m->lock);ret=regmap_read(m->base,5,&status);
++ if(!ret && (status&T110_RTC_IRQ)){
++  ret=t110_rtc_ctrl(m,0,1,T110_RTC_ACK);alarm=!ret;
++ }
++ if(!ret)ret=regmap_write(m->base,5,status&(T110_ONKEY_IRQ|T110_RTC_IRQ));
++ mutex_unlock(&m->lock);
++ if(ret){dev_err_ratelimited(m->rtc->dev.parent,"PM822 IRQ I/O failed: %d\n",ret);return IRQ_NONE;}
++ if(alarm){rtc_update_irq(m->rtc,1,RTC_IRQF|RTC_AF);pm_wakeup_event(m->rtc->dev.parent,0);}
++ return (status&(T110_ONKEY_IRQ|T110_RTC_IRQ))?IRQ_HANDLED:IRQ_NONE;
++}
++static void t110_rtc_cleanup(void *data)
++{
++ struct t110_monitor *m=data;
++ t110_rtc_ctrl(m,0,1,T110_RTC_ACK);
++ regmap_write(m->base,9,m->saved_int_en);
++ regmap_write(m->base,0x0e,m->saved_irq_cfg);
++ if(m->owns_wakeup)device_init_wakeup(m->rtc->dev.parent,false);
++}
++static int t110_rtc_setup(struct i2c_client *client, struct t110_monitor *m)
++{
++ struct device *dev=&client->dev;unsigned int en2,en3;int ret;
++ if(client->irq<=0)return -EINVAL;
++ ret=regmap_read(m->base,9,&m->saved_int_en);if(ret)return ret;
++ ret=regmap_read(m->base,10,&en2);if(ret)return ret;
++ ret=regmap_read(m->base,11,&en3);if(ret)return ret;
++ if((m->saved_int_en&~0x11)||en2||en3)return dev_err_probe(dev,-EBUSY,"Unexpected enabled PM822 IRQ clients\n");
++ ret=regmap_read(m->base,0x0e,&m->saved_irq_cfg);if(ret)return ret;
++ m->rtc=devm_rtc_allocate_device(dev);if(IS_ERR(m->rtc))return PTR_ERR(m->rtc);
++ m->rtc->ops=&t110_rtc_ops;m->rtc->range_min=0;m->rtc->range_max=U32_MAX;
++ m->irq=client->irq;
++ if(!device_can_wakeup(dev)){ret=device_init_wakeup(dev,true);if(ret)return ret;m->owns_wakeup=true;}
++ ret=devm_add_action_or_reset(dev,t110_rtc_cleanup,m);if(ret)return ret;
++ ret=devm_request_threaded_irq(dev,m->irq,NULL,t110_pmic_irq,IRQF_ONESHOT,"t110-pm822",m);if(ret)return ret;
++ /* Vendor mode: low-active pin, write-one-to-clear, masked status suppressed.
++  * Preserve watchdog configuration in the upper WAKEUP2 bits. */
++ ret=regmap_update_bits(m->base,0x0e,7,2);if(ret)return ret;
++ ret=regmap_write(m->base,5,0x11);if(ret)return ret;
++ ret=devm_rtc_register_device(m->rtc);if(ret)return ret;
++ ret=regmap_write(m->base,9,m->saved_int_en|0x11);if(ret)return ret;
++ dev_info(dev,"PM822 RTC and ONKEY wake on IRQ %d\n",m->irq);return 0;
++}
++static int t110_monitor_suspend(struct device *dev)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);int ret=0;
++ cancel_delayed_work_sync(&m->fuel_work);
++ if(device_may_wakeup(dev))ret=enable_irq_wake(m->irq);
++ if(ret)schedule_delayed_work(&m->fuel_work,5*HZ);
++ return ret;
++}
++static int t110_monitor_resume(struct device *dev)
++{
++ struct t110_monitor *m=dev_get_drvdata(dev);
++ if(device_may_wakeup(dev))disable_irq_wake(m->irq);
++ /* Consume a held wake press until release: do not immediately reblank. */
++ WRITE_ONCE(m->suppress_power,true);
++ schedule_delayed_work(&m->fuel_work,5*HZ);return 0;
++}
++static DEFINE_SIMPLE_DEV_PM_OPS(t110_monitor_pm,t110_monitor_suspend,t110_monitor_resume);
+diff --git a/arch/arm/mach-mmp/t110-sleep.S b/arch/arm/mach-mmp/t110-sleep.S
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-sleep.S
+@@ -0,0 +1,113 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#include <linux/linkage.h>
++#include <asm/assembler.h>
++#include <asm/asm-offsets.h>
++#include <asm/hardware/cache-l2x0.h>
++.text
++.align 5
++ENTRY(t110_cpu_resume)
++ /* The warm vector is shared. An offline CPU1 must never restore CPU0's
++  * suspend context if a cluster wake releases it as well. */
++ mrc p15, 0, r0, c0, c0, 5
++ ands r0, r0, #15
++ beq 8f
++ ldr r1, =0x08140040
++ str r0, [r1]
++ dsb sy
++9: wfi
++ b 9b
++8:
++ ldr r1, =0x08140008
++ mov r2, #3
++ str r2, [r1]
++ dsb sy
++ mov r0, #0
++ mcr p15, 0, r0, c7, c5, 0
++ bl v7_invalidate_l1
++ /* A0 cluster C2 can reset the SCU controller and tags; L2 SRAM is retained. */
++ ldr r1, =0xd1dfe000
++ ldr r2, [r1]
++ ldr r3, =0x08140010
++ str r2, [r3]
++ tst r2, #1
++ bne 1f
++ orr r2, r2, #0x21
++ str r2, [r1]
++ mov r2, #0xff
++ str r2, [r1, #0xc]
++1:
++ /* Return CPU0's power status to NORMAL before context restore. */
++ ldr r1, =0xd1dfe008
++ ldrb r2, [r1]
++ bic r2, r2, #3
++ strb r2, [r1]
++ dsb sy
++ ldr r1, =0x08140008
++ mov r2, #4
++ str r2, [r1]
++ dsb sy
++ /* Restore a reset PL310 controller without invalidating retained dirty SRAM. */
++ ldr r1, =0xd1dfb000
++ ldr r2, [r1, #L2X0_CTRL]
++ ldr r3, =0x08140014
++ str r2, [r3]
++ tst r2, #1
++ bne 2f
++ /* Derive the physical symbol address from this running physical PC. */
++ adr r3, t110_cpu_resume
++ ldr r4, =t110_cpu_resume
++ sub r3, r3, r4
++ ldr r2, =l2x0_saved_regs
++ add r2, r2, r3
++ ldr r3, [r2, #L2X0_R_AUX_CTRL]
++ str r3, [r1, #L2X0_AUX_CTRL]
++ ldr r3, [r2, #L2X0_R_TAG_LATENCY]
++ str r3, [r1, #L310_TAG_LATENCY_CTRL]
++ ldr r3, [r2, #L2X0_R_DATA_LATENCY]
++ str r3, [r1, #L310_DATA_LATENCY_CTRL]
++ ldr r3, [r2, #L2X0_R_FILTER_END]
++ str r3, [r1, #L310_ADDR_FILTER_END]
++ ldr r3, [r2, #L2X0_R_FILTER_START]
++ str r3, [r1, #L310_ADDR_FILTER_START]
++ ldr r3, [r2, #L2X0_R_PREFETCH_CTRL]
++ str r3, [r1, #L310_PREFETCH_CTRL]
++ ldr r3, [r2, #L2X0_R_PWR_CTRL]
++ str r3, [r1, #L310_POWER_CTRL]
++ mov r3, #1
++ str r3, [r1, #L2X0_CTRL]
++ dsb sy
++2:
++ ldr r1, =0x08140008
++ mov r2, #5
++ str r2, [r1]
++ dsb sy
++ b cpu_resume
++ENDPROC(t110_cpu_resume)
++
++/* Relocatable, MMU-off SRAM probe: inspect ranks before the first DDR access.
++ * All literals and the initial result stores live in the copied SRAM blob. */
++.align 5
++.global t110_sram_probe, t110_sram_probe_end, t110_sram_target
++ t110_sram_probe:
++ ldr r0, 10f
++ ldr r1, [r0]
++ adr r2, 12f
++ str r1, [r2]
++ ldr r0, 11f
++ ldr r3, [r0]
++ str r3, [r2, #4]
++ dsb sy
++ /* Only after capturing do we touch reserved DDR for persistent logging. */
++ ldr r0, 13f
++ str r1, [r0]
++ str r3, [r0, #4]
++ mov r1, #1
++ str r1, [r0, #8]
++ dsb sy
++ ldr pc, t110_sram_target
++10: .word 0xc0100008
++11: .word 0xc0100004
++12: .word 0, 0
++13: .word 0x08140090
++t110_sram_target: .word 0
++t110_sram_probe_end:
+diff --git a/arch/arm/mach-mmp/t110-sleep.h b/arch/arm/mach-mmp/t110-sleep.h
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-sleep.h
+@@ -0,0 +1,145 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 A0 staged suspend: individual CPU power collapse, shared cache retained. */
++#include <linux/cpu_pm.h>
++#include <linux/suspend.h>
++#include <linux/cpu.h>
++#include <asm/suspend.h>
++#include <asm/cacheflush.h>
++#include <asm/cp15.h>
++#include <asm/proc-fns.h>
++#include <asm/outercache.h>
++#include <asm/hardware/cache-l2x0.h>
++extern void t110_cpu_resume(void);
++static unsigned int cpu0_resumes, cpu0_aborts,ddr_cycles,last_awucrs;
++static u32 ddr_idle_cycles,ddr_commands,ddr_no_util;
++static int t110_finish_sleep(unsigned long unused)
++{
++ v7_exit_coherency_flush(louis);
++ scu_power_mode(t110_scu, SCU_PM_POWEROFF);
++ /* Vendor pxa988_finish_suspend quiesces PL310 after L1/coherency exit.
++  * CPU1 is already offline and IRQs disabled, as outer_disable requires.
++  * Keep L2 SRAM power control unchanged; only clean/invalidate/disable. */
++ if(READ_ONCE(l2_quiesce))outer_disable();
++ writel(2,sleep_trace+8);dsb(sy);
++ cpu_do_idle();
++ /* No reset means entry was aborted; restore coherency before returning. */
++ if(READ_ONCE(l2_quiesce))outer_resume();
++ scu_power_mode(t110_scu, SCU_PM_NORMAL);
++ asm volatile("mrc p15, 0, %0, c1, c0, 1\n"
++              "orr %0, %0, #64\n"
++              "mcr p15, 0, %0, c1, c0, 1\n"
++              "isb\n"
++              "mrc p15, 0, %0, c1, c0, 0\n"
++              "orr %0, %0, #4\n"
++              "mcr p15, 0, %0, c1, c0, 0\n"
++              "isb" : "=&r" (unused) : : "memory");
++ return -EAGAIN;
++}
++static int t110_standby_enter(suspend_state_t state)
++{
++ u32 core, apcr, mask, vector,mp0,mp1,before,scu,timer,icu_pmic,icu_gpio,ciu_mc,bidle,bcmd,bno,cpcr,lcd_clock,dsi_clock;int ret;
++ if(state != PM_SUSPEND_STANDBY || num_online_cpus()!=1)return -EINVAL;
++ if(READ_ONCE(ddr_level)==3 && (!(readl(MPMU_REG(0x1020))&BIT(0)) || (readl(MPMU_REG(0x20))&0x2c)!=0x2c))return -EBUSY;
++ if(READ_ONCE(ddr_level) && (readl(MPMU_REG(0))&BIT(15))) {pr_err("t110-sleep: CP masks PMIC wake port 7; refusing DDR vote\n");return -EOPNOTSUPP;}
++ core=readl(APMU_REG(0x124));apcr=readl(MPMU_REG(0x1000));
++ mask=readl(MPMU_REG(0x104c));vector=readl(CIU_REG(0xd8));
++ mp0=readl(APMU_REG(0x120));mp1=readl(APMU_REG(0xe4));
++ scu=readl(t110_scu);timer=readl(APMU_REG(0x84));
++ ciu_mc=readl(CIU_REG(0x40));
++ cpcr=readl(MPMU_REG(0));
++ lcd_clock=readl(APMU_REG(0x4c));dsi_clock=readl(APMU_REG(0x44));
++ icu_pmic=readl(AXI_VIRT_BASE+0x82010);
++ icu_gpio=readl(AXI_VIRT_BASE+0x820c4);
++ ret=cpu_pm_enter();if(ret)return ret;
++ if(READ_ONCE(ddr_level)) {
++  ret=cpu_cluster_pm_enter();if(ret){cpu_pm_exit();return ret;}
++  /* The always-on ICU wake generator must mirror the PMIC GIC route.
++   * Vendor wakeupgen.c: SPI4, CPU0, IRQ, nonzero priority. Global ICU
++   * delivery remains masked; this is the wake path, not a second handler. */
++  writel((icu_pmic & ~((0xf<<6)|0xf))|BIT(6)|BIT(4)|1,AXI_VIRT_BASE+0x82010);
++  writel((icu_gpio & ~((0xf<<6)|0xf))|BIT(6)|BIT(4)|1,AXI_VIRT_BASE+0x820c4);
++  __cpuc_flush_dcache_area(&l2x0_saved_regs,sizeof(l2x0_saved_regs));
++  outer_clean_range(__pa_symbol(&l2x0_saved_regs),__pa_symbol(&l2x0_saved_regs)+sizeof(l2x0_saved_regs));
++ }
++ writel(READ_ONCE(sram_probe_enabled)?sram_probe_phys:__pa_symbol(t110_cpu_resume),CIU_REG(0xd8));
++ writel(0,sleep_trace+0x98);
++ /* PMIC line 7 plus the asynchronous/full-idle abort paths, no DDR votes. */
++ writel(mask|BIT(2)|BIT(7)|BIT(24)|BIT(25),MPMU_REG(0x104c));
++ writel(apcr & ~(BIT(13)|BIT(15)|BIT(21)),MPMU_REG(0x1000));
++ if(READ_ONCE(ddr_level)) {
++  /* Vendor A0 entry prerequisites: SCU idle handshake and 10us stability. */
++  writel(scu|BIT(5),t110_scu);writel(0x28207,APMU_REG(0x84));
++  /* Vendor A0 cluster C2, retaining L2 SRAM and its dirty cache contents. */
++  writel(mp0|BIT(0)|BIT(1)|BIT(3)|BIT(11),APMU_REG(0x120));writel(mp1|BIT(0)|BIT(1)|BIT(3)|BIT(11),APMU_REG(0xe4));
++  /* Board-only experiment: CP and MSA must both be held in reset. Match
++   * the domain sleep votes, without UDR or oscillator shutdown. */
++  if(READ_ONCE(ddr_level)==3)
++   writel((cpcr & ~BIT(13)) | BIT(30)|BIT(28)|BIT(25)|BIT(14)|BIT(31)|BIT(29)|BIT(27)|BIT(26),MPMU_REG(0));
++  /* PXA986 baseline differs from PXA988: vendor init sets DSPSD bit30
++   * only for cpu_is_pxa988(). TWRP on this A0 board reads APCR=12004000.
++   * Clear DSPSD explicitly so a stale PXA988 vote cannot survive. */
++  if(READ_ONCE(ddr_level)==1 || READ_ONCE(ddr_level)==3)
++   writel((apcr & ~(BIT(30)|BIT(13)|BIT(15)|BIT(21))) | BIT(28)|BIT(25)|BIT(14)|BIT(31)|BIT(29)|BIT(27)|BIT(26),MPMU_REG(0x1000));
++  /* Vendor POWER_MODE_UDR_VCTCXO differs from SYS_SLEEP by STBYEN.
++   * Keep oscillator on and L2 SRAM retained; this is an opt-in experiment. */
++  if(READ_ONCE(standby_request) && (READ_ONCE(ddr_level)==1 || READ_ONCE(ddr_level)==3))
++   writel(readl(MPMU_REG(0x1000))|BIT(13),MPMU_REG(0x1000));
++ }
++ before=readl(sleep_mc+0x450);
++ bidle=readl(sleep_mc+0x454);bcmd=readl(sleep_mc+0x458);bno=readl(sleep_mc+0x45c);
++ /* Vendor clock-pxa988.c A0 MCK4/AXI dynamic gating setup. The setting
++  * is restricted to this quiesced test and restored immediately on return. */
++ if(READ_ONCE(sleep_gating))
++  writel((ciu_mc & ~(BIT(16)|BIT(19))) | (0xff<<8) | BIT(17)|BIT(18)|BIT(20)|BIT(21)|BIT(26)|BIT(27),CIU_REG(0x40));
++ writel(ciu_mc,sleep_trace+0x80);writel(readl(CIU_REG(0x40)),sleep_trace+0x84);
++ writel(0x54313130,sleep_trace);writel(ddr_level,sleep_trace+4);writel(1,sleep_trace+8);
++ writel(0,sleep_trace+0x40);writel(0xffffffff,sleep_trace+0x10);writel(0xffffffff,sleep_trace+0x14);
++ writel(core|0x1f,APMU_REG(0x124));
++ writel(readl(AXI_VIRT_BASE+0x82010),sleep_trace+0x18);
++ writel(readl(AXI_VIRT_BASE+0x82114),sleep_trace+0x1c);
++ /* DRM has stopped all scanout fetches. Vendor clock-pxa988.c defines
++  * LCD AXI/HCLK/FCLK enables as bits3/5/4 and DSI PHY enables as bits2/5.
++  * Keep resets, PLL selection and dividers untouched. All device IRQs are
++  * suspended here; restore clocks before device resume touches LCD MMIO. */
++ if(READ_ONCE(display_gating)) {
++  writel(dsi_clock & ~(BIT(2)|BIT(5)),APMU_REG(0x44));
++  writel(lcd_clock & ~(BIT(3)|BIT(4)|BIT(5)),APMU_REG(0x4c));
++ }
++ writel(readl(APMU_REG(0x4c)),sleep_trace+0xa0);
++ writel(readl(APMU_REG(0x44)),sleep_trace+0xa4);
++ writel(readl(APMU_REG(0x5c)),sleep_trace+0xa8);
++ dsb(sy);
++ pr_info("t110-sleep: enter level=%u core=%08x mp=%08x/%08x apcr=%08x cpcr=%08x wake=%08x mc_sleep=%08x\n",ddr_level,readl(APMU_REG(0x124)),readl(APMU_REG(0x120)),readl(APMU_REG(0xe4)),readl(MPMU_REG(0x1000)),readl(MPMU_REG(0)),readl(MPMU_REG(0x104c)),readl(APMU_REG(0xb0)));
++ ret=cpu_suspend(0,t110_finish_sleep);
++ if(READ_ONCE(l2_quiesce))outer_resume();
++ if(READ_ONCE(display_gating)) {
++  writel(lcd_clock,APMU_REG(0x4c));readl(APMU_REG(0x4c));udelay(20);
++  writel(dsi_clock,APMU_REG(0x44));readl(APMU_REG(0x44));udelay(20);
++ }
++ writel(ciu_mc,CIU_REG(0x40));dsb(sy);
++ writel(cpcr,MPMU_REG(0));
++ writel(6,sleep_trace+8);dsb(sy);
++ ddr_cycles=readl(sleep_mc+0x450)-before;last_awucrs=readl(MPMU_REG(0x1048));
++ ddr_idle_cycles=readl(sleep_mc+0x454)-bidle;ddr_commands=readl(sleep_mc+0x458)-bcmd;ddr_no_util=readl(sleep_mc+0x45c)-bno;
++ writel(mp0,APMU_REG(0x120));writel(mp1,APMU_REG(0xe4));
++ writel(scu,t110_scu);writel(timer,APMU_REG(0x84));
++ writel(core,APMU_REG(0x124));
++ writel(apcr,MPMU_REG(0x1000));writel(mask,MPMU_REG(0x104c));
++ writel(vector,CIU_REG(0xd8));dsb(sy);
++ writel(icu_pmic,AXI_VIRT_BASE+0x82010);
++ writel(icu_gpio,AXI_VIRT_BASE+0x820c4);
++ if(READ_ONCE(ddr_level))cpu_cluster_pm_exit();
++ writel(7,sleep_trace+8);dsb(sy);
++ cpu_pm_exit();
++ if(!ret)cpu0_resumes++;else cpu0_aborts++;
++ pr_info("t110-sleep: CPU0 C2 ret=%d resumes=%u aborts=%u status=%08x\n",ret,cpu0_resumes,cpu0_aborts,readl(APMU_REG(0x90)));
++ return ret;
++}
++static int t110_standby_valid(suspend_state_t state)
++{
++ return state==PM_SUSPEND_STANDBY;
++}
++static const struct platform_suspend_ops t110_suspend_ops={
++ .valid=t110_standby_valid,
++ .enter=t110_standby_enter,
++};
+diff --git a/arch/arm/mach-mmp/t110-vpu-probe.c b/arch/arm/mach-mmp/t110-vpu-probe.c
+new file mode 100644
+--- /dev/null
++++ b/arch/arm/mach-mmp/t110-vpu-probe.c
+@@ -0,0 +1,203 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Bounded SM-T110 CODA7542 firmware identification test. Root only. */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/miscdevice.h>
++#include <linux/fs.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/dma-mapping.h>
++#include <linux/firmware.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/unaligned.h>
++#include <linux/uaccess.h>
++#include <linux/suspend.h>
++#include <linux/dma-buf.h>
++#include <linux/scatterlist.h>
++#include <linux/file.h>
++static bool powered;
++static u32 savedclk;
++static int opened;
++#define MEMSIZE 0x1000000
++static struct platform_device *pdev;
++static void __iomem *apmu,*regs;
++static void *mem;
++static dma_addr_t dma;
++static DEFINE_MUTEX(lock);
++static unsigned int exports;
++static struct sg_table *probe_map(struct dma_buf_attachment *a,enum dma_data_direction dir)
++{
++ struct sg_table *sg=kzalloc(sizeof(*sg),GFP_KERNEL);int ret;
++ if(!sg)return ERR_PTR(-ENOMEM);
++ ret=dma_get_sgtable(&pdev->dev,sg,mem,dma,MEMSIZE);
++ if(ret){kfree(sg);return ERR_PTR(ret);}
++ ret=dma_map_sgtable(a->dev,sg,dir,0);
++ if(ret){sg_free_table(sg);kfree(sg);return ERR_PTR(ret);}
++ return sg;
++}
++static void probe_unmap(struct dma_buf_attachment *a,struct sg_table *sg,enum dma_data_direction dir)
++{dma_unmap_sgtable(a->dev,sg,dir,0);sg_free_table(sg);kfree(sg);}
++static void probe_dmabuf_release(struct dma_buf *buf)
++{
++ mutex_lock(&lock);exports--;
++ if(!exports&&!opened&&mem){dma_free_coherent(&pdev->dev,MEMSIZE,mem,dma);mem=NULL;}
++ mutex_unlock(&lock);
++}
++static int probe_dmabuf_mmap(struct dma_buf *buf,struct vm_area_struct *vma)
++{
++ if(vma->vm_pgoff || vma->vm_end-vma->vm_start!=MEMSIZE)return -EINVAL;
++ return dma_mmap_coherent(&pdev->dev,vma,mem,dma,MEMSIZE);
++}
++static const struct dma_buf_ops dma_ops={.map_dma_buf=probe_map,.unmap_dma_buf=probe_unmap,.release=probe_dmabuf_release,.mmap=probe_dmabuf_mmap};
++static int status_get(char *buf,const struct kernel_param *kp)
++{
++ int n;mutex_lock(&lock);
++ n=scnprintf(buf,PAGE_SIZE,"opened=%d powered=%d dma_allocated=%d exports=%u clock=%08x power=%08x busy=%08x pc=%08x\n",opened,powered,!!mem,exports,readl(apmu+0xa4),readl(apmu+0xf0),powered?readl(regs+0x160):0,powered?readl(regs+0x18):0);
++ mutex_unlock(&lock);return n;
++}
++static const struct kernel_param_ops status_ops={.get=status_get};
++module_param_cb(status,&status_ops,NULL,0400);
++static void regwrite(u32 off,u32 v){writel(v,regs+off);}
++static int test_firmware(void)
++{
++ const struct firmware *fw;u32 oldclk,oldpwr,v,ver=0;int ret,i;
++ ret=request_firmware(&fw,"t110-coda7542-stock.bin",&pdev->dev);
++ if(ret)return ret;
++ if(fw->size!=0x28000){release_firmware(fw);return -EINVAL;}
++ oldclk=readl(apmu+0xa4);oldpwr=readl(apmu+0xd8);
++ if(powered){ret=0;goto release;}
++ if(oldpwr&BIT(2)){ret=-EBUSY;goto release;}
++ savedclk=oldclk;
++ /* Vendor PXA986 automatic VPU power sequence. Other power bits retained. */
++ writel(oldclk|BIT(19),apmu+0xa4);
++ writel(0x20001fff,apmu+0xdc);
++ writel(readl(apmu+0xd8)|BIT(2),apmu+0xd8);
++ ret=readl_poll_timeout(apmu+0xf0,v,v&BIT(2),10,3000);
++ if(ret)goto poweroff;
++ /* PLL1_624 /4 =156 MHz for both AXI and functional clocks.
++  * Vendor DIV fields store divisor-minus-one. */
++ v=readl(apmu+0xa4);
++ v&=~((3<<6)|(7<<8)|(3<<11)|(7<<13));
++ v|=BIT(6)|BIT(11)|(3<<8)|(3<<13)|BIT(3)|BIT(4)|BIT(5)|BIT(19);
++ writel(v|BIT(20)|BIT(21),apmu+0xa4);
++ ret=readl_poll_timeout(apmu+0xa4,v,!(v&(BIT(20)|BIT(21))),10,3000);
++ if(ret)goto poweroff;
++ /* Release AXI, functional and AHB resets. */
++ writel(v|7,apmu+0xa4);udelay(10);
++ regwrite(0,0);
++ memset(mem,0,0x100000);
++ /* Same 64-bit memory order as original HAL: reverse each four u16s. */
++ for(i=0;i<fw->size/2;i++)
++  ((u16 *)mem)[i^3]=get_unaligned_le16(fw->data+2*i);
++ regwrite(0x100,dma);regwrite(0x104,dma+0x32000);
++ regwrite(0x108,dma+0xeb000);regwrite(0x10c,8);
++ regwrite(0x110,0);regwrite(0x170,0);
++ for(i=0;i<2048;i++)regwrite(4,(i<<16)|get_unaligned_le16(fw->data+i*2));
++ wmb();regwrite(0x160,1);regwrite(0,1);
++ ret=readl_poll_timeout(regs+0x160,v,!v,100,500000);
++ pr_info("T110_VPU: boot ret=%d PC=%08x busy=%08x clock=%08x\n",ret,readl(regs+0x18),v,readl(apmu+0xa4));
++ if(ret)goto stop;
++ regwrite(0x1c0,0);regwrite(0x160,1);
++ regwrite(0x168,0);regwrite(0x16c,0);regwrite(0x164,0xf);
++ ret=readl_poll_timeout(regs+0x160,v,!v,100,500000);
++ ver=readl(regs+0x1c0);
++ pr_info("T110_VPU: version ret=%d version=%08x PC=%08x\n",ret,ver,readl(regs+0x18));
++ if(!ret&&!ver)ret=-ENODEV;
++ if(!ret){powered=true;goto release;}
++stop:
++ regwrite(0x170,0);regwrite(0,0);regwrite(0xc,1);
++poweroff:
++ writel(readl(apmu+0xa4)&~0x3f,apmu+0xa4);
++ writel(readl(apmu+0xd8)&~BIT(2),apmu+0xd8);
++ if(readl_poll_timeout(apmu+0xf0,v,!(v&BIT(2)),10,3000))pr_err("T110_VPU: power-off timeout\n");
++ writel(oldclk,apmu+0xa4);
++release:
++ release_firmware(fw);return ret;
++}
++static long probe_ioctl(struct file *f,unsigned int cmd,unsigned long arg)
++{
++ int ret;
++ if(cmd==0x5604){
++  DEFINE_DMA_BUF_EXPORT_INFO(info);struct dma_buf *buf;
++  if(!capable(CAP_SYS_RAWIO))return -EPERM;
++  info.ops=&dma_ops;info.size=MEMSIZE;info.flags=O_RDWR;info.priv=&exports;
++  mutex_lock(&lock);exports++;mutex_unlock(&lock);
++  buf=dma_buf_export(&info);
++  if(IS_ERR(buf)){mutex_lock(&lock);exports--;mutex_unlock(&lock);return PTR_ERR(buf);}
++  ret=dma_buf_fd(buf,O_CLOEXEC);if(ret<0)dma_buf_put(buf);return ret;
++ }
++ if(cmd==0x5602)return put_user((u32)dma,(u32 __user *)arg);
++ if(cmd!=0x5601)return -ENOTTY;
++ if(!capable(CAP_SYS_RAWIO))return -EPERM;
++ if(!mutex_trylock(&lock))return -EBUSY;
++ ret=test_firmware();mutex_unlock(&lock);return ret;
++}
++static int probe_open(struct inode *ino,struct file *file)
++{
++ if(!capable(CAP_SYS_RAWIO))return -EPERM;
++ mutex_lock(&lock);
++ if(opened){mutex_unlock(&lock);return -EBUSY;}
++ if(!mem)mem=dma_alloc_coherent(&pdev->dev,MEMSIZE,&dma,GFP_KERNEL);
++ if(!mem){mutex_unlock(&lock);return -ENOMEM;}
++ opened=1;mutex_unlock(&lock);return 0;
++}
++static int probe_close(struct inode *ino,struct file *file)
++{
++ u32 v;mutex_lock(&lock);
++ if(powered){
++  regwrite(0x170,0);regwrite(0,0);regwrite(0xc,1);
++  writel(readl(apmu+0xa4)&~0x3f,apmu+0xa4);
++  writel(readl(apmu+0xd8)&~BIT(2),apmu+0xd8);
++  if(readl_poll_timeout(apmu+0xf0,v,!(v&BIT(2)),10,3000))pr_err("T110_VPU: close power-off timeout\n");
++  writel(savedclk,apmu+0xa4);powered=false;
++ }
++ opened=0;
++ if(!exports){dma_free_coherent(&pdev->dev,MEMSIZE,mem,dma);mem=NULL;}
++ mutex_unlock(&lock);return 0;
++}
++static int probe_mmap(struct file *file,struct vm_area_struct *vma)
++{
++ unsigned long size=vma->vm_end-vma->vm_start;
++ if(!capable(CAP_SYS_RAWIO))return -EPERM;
++ if(vma->vm_pgoff==0 && size==PAGE_SIZE){
++  vma->vm_page_prot=pgprot_noncached(vma->vm_page_prot);
++  return vm_iomap_memory(vma,0xd420d000,PAGE_SIZE);
++ }
++ if(vma->vm_pgoff!=1 || size!=MEMSIZE)return -EINVAL;
++ vma->vm_pgoff=0;
++ return dma_mmap_coherent(&pdev->dev,vma,mem,dma,MEMSIZE);
++}
++static const struct file_operations fops={.owner=THIS_MODULE,.unlocked_ioctl=probe_ioctl,.open=probe_open,.release=probe_close,.mmap=probe_mmap};
++static struct miscdevice misc={.minor=MISC_DYNAMIC_MINOR,.name="t110-vpu-probe",.fops=&fops,.mode=0600};
++static int probe_pm(struct notifier_block *nb,unsigned long action,void *unused)
++{
++ if(action==PM_SUSPEND_PREPARE && READ_ONCE(opened))return NOTIFY_BAD;
++ return NOTIFY_OK;
++}
++static struct notifier_block probe_pm_nb={.notifier_call=probe_pm};
++static int __init init_probe(void)
++{
++ int ret;
++ if(!of_machine_is_compatible("samsung,goyawifi"))return -ENODEV;
++ pdev=platform_device_register_simple("t110-vpu-probe",-1,NULL,0);
++ if(IS_ERR(pdev))return PTR_ERR(pdev);
++ ret=dma_coerce_mask_and_coherent(&pdev->dev,DMA_BIT_MASK(32));if(ret)goto device;
++ apmu=ioremap(0xd4282800,0x100);regs=ioremap(0xd420d000,0x1000);
++ if(!apmu||!regs){ret=-ENOMEM;goto maps;}
++ ret=misc_register(&misc);if(!ret){register_pm_notifier(&probe_pm_nb);return 0;}
++maps:
++ if(apmu)iounmap(apmu);
++ if(regs)iounmap(regs);
++device:
++ platform_device_unregister(pdev);return ret;
++}
++static void __exit exit_probe(void)
++{
++ unregister_pm_notifier(&probe_pm_nb);misc_deregister(&misc);
++ iounmap(regs);iounmap(apmu);platform_device_unregister(pdev);
++}
++module_init(init_probe);module_exit(exit_probe);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SM-T110 bounded CODA7542 identification probe");
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/include/linux/t110-board.h b/include/linux/t110-board.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/t110-board.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_T110_BOARD_H
++#define _LINUX_T110_BOARD_H
++void pxa98x_fixup_boot_fdt(void *blob);
++struct i2c_adapter;
++struct i2c_client;
++/* Board-private bring-up interfaces. Callback must not use the parked bus. */
++int i2c_pxa_goya_bridge_bootstrap(struct i2c_adapter *adap,
++                                int (*action)(void *),void *data);
++int zinitix_goya_bridge_bootstrap(struct i2c_client *client,
++                                int (*action)(void *),void *data);
++int t110_display_bootstrap(int (*action)(void *),void *data);
++struct module;
++int i2c_pxa_goya_bridge_suspend(struct i2c_adapter *adap,
++                              int (*off)(void *),int (*on)(void *),
++                              void *data,struct module *owner);
++int t110_display_resume_bridge(int (*action)(void *),void *data);
++#endif

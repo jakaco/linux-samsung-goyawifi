@@ -1,0 +1,14 @@
+{
+  "build_finished": true,
+  "target": "armv7",
+  "source": "official pmbootstrap isolated build with local overlay",
+  "pmaports_commit": "1eb4dce28ef2d0ecc8651914bcb4972083eefb0f",
+  "pmbootstrap_commit": "46ee403e4680002ce42dc2645adf9b08557270e9",
+  "packages": {
+    "linux-samsung-goyawifi-7.3_rc7-r10.apk": "38d3f0ab46f4502bff687b9d3821f5eb4e4d4e7111e56af83121a638d8a7ba2c",
+    "device-samsung-goyawifi-5-r6.apk": "70f9750d5038a16f1f946cebf196c2235af8adb9ce59dc99af2b4a1ebbfbc472",
+    "device-samsung-goyawifi-nonfree-firmware-5-r6.apk": "85603a2f3a8e817d48496ae923e94c24b142aa1f0d223f38a846d868f557685d",
+    "firmware-samsung-goyawifi-2-r0.apk": "54158b4c43c4955bfe7b33e6b14f683cd0ab3cc34f02e74f0a30162aa93f7a06",
+    "goyawifi-mkbootimg-1-r0.apk": "8a94a74eff56bd41a73518b8bc59b3623b7ea56691a738d79953cdf5a45e7734"
+  }
+}

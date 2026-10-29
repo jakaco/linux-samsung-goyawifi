@@ -1,0 +1,5 @@
+# Keep the same conventional wireless name with either init system.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="mlan*", NAME="wlan%n"
+ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="d4280800.mmc", ATTR{power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="sdio", ATTRS{vendor}=="0x02df", ATTR{power/control}="on"
+# Existing udev seat/input rules handle DRM, audio, touch and accelerometer.

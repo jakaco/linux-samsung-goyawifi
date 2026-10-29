@@ -1,0 +1,21 @@
+name: Source and image checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      - name: Verify pinned source and patches
+        run: python3 prepare-source.py
+      - name: Exercise actual boot packer layout
+        run: python3 test-image-layout.py
+      - name: Python and shell syntax
+        run: |
+          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py
+          sh -n build-kernel.sh

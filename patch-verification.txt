@@ -1,0 +1,2 @@
+PASS: all four patches apply to pristine f909e534f5e34feb2ea2701d54df63e21aa506fc
+PASS: 73 resulting source files match the compiled tree byte-for-byte

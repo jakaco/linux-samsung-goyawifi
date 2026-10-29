@@ -1,0 +1,2439 @@
+Subject: [PATCH 3/4] SM-T110 local port: display-gpu-audio-camera-and-vpu
+
+diff --git a/drivers/dma/mmp_tdma.c b/drivers/dma/mmp_tdma.c
+--- a/drivers/dma/mmp_tdma.c
++++ b/drivers/dma/mmp_tdma.c
+@@ -503,6 +503,14 @@
+ 	return 0;
+ }
+ 
++static void mmp_tdma_synchronize(struct dma_chan *chan)
++{
++	struct mmp_tdma_chan *tdmac = to_mmp_tdma_chan(chan);
++
++	/* Stop/free must wait for a period callback already queued by the IRQ. */
++	tasklet_kill(&tdmac->tasklet);
++}
++
+ static int mmp_tdma_config(struct dma_chan *chan,
+ 			   struct dma_slave_config *dmaengine_cfg)
+ {
+@@ -537,6 +545,12 @@
+ 			dma_cookie_t cookie, struct dma_tx_state *txstate)
+ {
+ 	struct mmp_tdma_chan *tdmac = to_mmp_tdma_chan(chan);
++
++	/* PCM cleanup may query status before the first cyclic transfer. */
++	if (!tdmac->desc_arr) {
++		dma_set_tx_state(txstate, chan->completed_cookie, chan->cookie, 0);
++		return DMA_COMPLETE;
++	}
+ 
+ 	tdmac->pos = mmp_tdma_get_pos(tdmac);
+ 	dma_set_tx_state(txstate, chan->completed_cookie, chan->cookie,
+@@ -696,6 +710,7 @@
+ 	tdev->device.device_pause = mmp_tdma_pause_chan;
+ 	tdev->device.device_resume = mmp_tdma_resume_chan;
+ 	tdev->device.device_terminate_all = mmp_tdma_terminate_all;
++	tdev->device.device_synchronize = mmp_tdma_synchronize;
+ 	tdev->device.copy_align = DMAENGINE_ALIGN_8_BYTES;
+ 
+ 	tdev->device.directions = BIT(DMA_DEV_TO_MEM) | BIT(DMA_MEM_TO_DEV);
+diff --git a/drivers/gpu/drm/etnaviv/Kconfig b/drivers/gpu/drm/etnaviv/Kconfig
+--- a/drivers/gpu/drm/etnaviv/Kconfig
++++ b/drivers/gpu/drm/etnaviv/Kconfig
+@@ -22,3 +22,9 @@
+ 	help
+ 	  Compile in support for thermal throttling.
+ 	  Say Y unless you want to risk burning your SoC.
++
++config DRM_ETNAVIV_T110
++	bool "Experimental SM-T110 GC1000 devfreq"
++	depends on DRM_ETNAVIV && T110_GPU_POWER && PM_DEVFREQ
++	select DEVFREQ_GOV_SIMPLE_ONDEMAND
++	select DEVFREQ_GOV_USERSPACE
+diff --git a/drivers/gpu/drm/etnaviv/Makefile b/drivers/gpu/drm/etnaviv/Makefile
+--- a/drivers/gpu/drm/etnaviv/Makefile
++++ b/drivers/gpu/drm/etnaviv/Makefile
+@@ -18,3 +18,5 @@
+ 	etnaviv_sched.o
+ 
+ obj-$(CONFIG_DRM_ETNAVIV)	+= etnaviv.o
++
++etnaviv-$(CONFIG_DRM_ETNAVIV_T110) += etnaviv_t110.o
+diff --git a/drivers/gpu/drm/etnaviv/etnaviv_gem.c b/drivers/gpu/drm/etnaviv/etnaviv_gem.c
+--- a/drivers/gpu/drm/etnaviv/etnaviv_gem.c
++++ b/drivers/gpu/drm/etnaviv/etnaviv_gem.c
+@@ -6,6 +6,7 @@
+ #include <drm/drm_prime.h>
+ #include <drm/drm_print.h>
+ #include <linux/dma-mapping.h>
++#include <linux/of.h>
+ #include <linux/pagemap.h>
+ #include <linux/shmem_fs.h>
+ #include <linux/spinlock.h>
+@@ -410,7 +411,12 @@
+ 			return ret == 0 ? -ETIMEDOUT : ret;
+ 	}
+ 
+-	if (etnaviv_obj->flags & ETNA_BO_CACHED) {
++	/* Goyawifi exhibits stale 32-byte lines in WC readback unless CPU
++	 * preparation and completion also maintain its cache aliases. Keep this
++	 * workaround board-scoped pending a platform cache-coherency audit.
++	 */
++	if ((etnaviv_obj->flags & ETNA_BO_CACHED) ||
++	    of_machine_is_compatible("samsung,goyawifi")) {
+ 		dma_sync_sgtable_for_cpu(dev->dev, etnaviv_obj->sgt,
+ 					 etnaviv_op_to_dma_dir(op));
+ 		etnaviv_obj->last_cpu_prep_op = op;
+@@ -424,7 +430,12 @@
+ 	struct drm_device *dev = obj->dev;
+ 	struct etnaviv_gem_object *etnaviv_obj = to_etnaviv_bo(obj);
+ 
+-	if (etnaviv_obj->flags & ETNA_BO_CACHED) {
++	/* Goyawifi exhibits stale 32-byte lines in WC readback unless CPU
++	 * preparation and completion also maintain its cache aliases. Keep this
++	 * workaround board-scoped pending a platform cache-coherency audit.
++	 */
++	if ((etnaviv_obj->flags & ETNA_BO_CACHED) ||
++	    of_machine_is_compatible("samsung,goyawifi")) {
+ 		/* fini without a prep is almost certainly a userspace error */
+ 		WARN_ON(etnaviv_obj->last_cpu_prep_op == 0);
+ 		dma_sync_sgtable_for_device(dev->dev, etnaviv_obj->sgt,
+diff --git a/drivers/gpu/drm/etnaviv/etnaviv_gpu.c b/drivers/gpu/drm/etnaviv/etnaviv_gpu.c
+--- a/drivers/gpu/drm/etnaviv/etnaviv_gpu.c
++++ b/drivers/gpu/drm/etnaviv/etnaviv_gpu.c
+@@ -4,6 +4,8 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/of.h>
++#include "etnaviv_t110.h"
+ #include <linux/component.h>
+ #include <linux/delay.h>
+ #include <linux/dma-fence.h>
+@@ -173,6 +175,11 @@
+ 	}
+ 
+ 	return 0;
++}
++
++static bool t110_scaling(struct etnaviv_gpu *gpu)
++{
++	return IS_ENABLED(CONFIG_DRM_ETNAVIV_T110) && of_machine_is_compatible("samsung,goyawifi") && of_property_read_bool(gpu->dev->of_node,"samsung,t110-gpu-scaling");
+ }
+ 
+ static int etnaviv_gpu_reset_deassert(struct etnaviv_gpu *gpu)
+@@ -507,6 +514,7 @@
+ 
+ static void etnaviv_gpu_update_clock(struct etnaviv_gpu *gpu)
+ {
++	if(t110_scaling(gpu)){gpu->fe_waitcycles=clamp(clk_get_rate(gpu->clk_core)>>15,200UL,0xffffUL);return;}
+ 	if (gpu->identity.minor_features2 &
+ 	    chipMinorFeatures2_DYNAMIC_FREQUENCY_SCALING) {
+ 		clk_set_rate(gpu->clk_core,
+@@ -514,7 +522,7 @@
+ 		clk_set_rate(gpu->clk_shader,
+ 			     gpu->base_rate_shader >> gpu->freq_scale);
+ 	} else {
+-		unsigned int fscale = 1 << (6 - gpu->freq_scale);
++		unsigned int fscale = t110_scaling(gpu) ? 64 : 1 << (6 - gpu->freq_scale);
+ 		u32 clock = gpu_read(gpu, VIVS_HI_CLOCK_CONTROL);
+ 
+ 		clock &= ~VIVS_HI_CLOCK_CONTROL_FSCALE_VAL__MASK;
+@@ -541,7 +549,7 @@
+ 	timeout = jiffies + msecs_to_jiffies(1000);
+ 
+ 	while (time_is_after_jiffies(timeout)) {
+-		unsigned int fscale = 1 << (6 - gpu->freq_scale);
++		unsigned int fscale = t110_scaling(gpu) ? 64 : 1 << (6 - gpu->freq_scale);
+ 		u32 pulse_eater = 0x01590880;
+ 
+ 		/* disable clock gating */
+@@ -944,6 +952,9 @@
+ 	mutex_lock(&gpu->lock);
+ 	etnaviv_gpu_hw_init(gpu);
+ 	mutex_unlock(&gpu->lock);
++
++	ret=etnaviv_t110_init(gpu);
++	if(ret) dev_warn(gpu->dev,"T110 devfreq unavailable: %d; retaining fixed clock\n",ret);
+ 
+ 	pm_runtime_mark_last_busy(gpu->dev);
+ 	pm_runtime_put_autosuspend(gpu->dev);
+@@ -1467,6 +1478,7 @@
+ 		etnaviv_sync_point_queue(gpu, event[1]);
+ 	}
+ 
++	etnaviv_t110_busy(gpu,1);
+ 	gpu->event[event[0]].fence = gpu_fence;
+ 	submit->cmdbuf.user_size = submit->cmdbuf.size - 8;
+ 	etnaviv_buffer_queue(gpu, submit->exec_state, submit->mmu_context,
+@@ -1529,6 +1541,7 @@
+ 
+ 	etnaviv_hw_reset(gpu);
+ 
++	etnaviv_t110_reset(gpu);
+ 	/* complete all events, the GPU won't do it after the reset */
+ 	spin_lock(&gpu->event_spinlock);
+ 	for_each_set_bit(i, gpu->event_bitmap, ETNA_NR_EVENTS)
+@@ -1646,6 +1659,7 @@
+ 			 */
+ 			if (fence_after(fence->seqno, gpu->completed_fence))
+ 				gpu->completed_fence = fence->seqno;
++			etnaviv_t110_busy(gpu,-1);
+ 			dma_fence_signal_timestamp(fence, now);
+ 
+ 			event_free(gpu, event);
+@@ -1761,7 +1775,8 @@
+ etnaviv_gpu_cooling_get_max_state(struct thermal_cooling_device *cdev,
+ 				  unsigned long *state)
+ {
+-	*state = 6;
++	struct etnaviv_gpu *gpu = cdev->devdata;
++	*state = t110_scaling(gpu) ? 3 : 6;
+ 
+ 	return 0;
+ }
+@@ -1783,6 +1798,7 @@
+ {
+ 	struct etnaviv_gpu *gpu = cdev->devdata;
+ 
++	if(t110_scaling(gpu))return etnaviv_t110_cooling(gpu,state);
+ 	mutex_lock(&gpu->lock);
+ 	gpu->freq_scale = state;
+ 	if (!pm_runtime_suspended(gpu->dev))
+@@ -1862,6 +1878,7 @@
+ 
+ 	DBG("%s", dev_name(gpu->dev));
+ 
++	etnaviv_t110_fini(gpu);
+ 	destroy_workqueue(gpu->wq);
+ 
+ 	etnaviv_sched_fini(gpu);
+diff --git a/drivers/gpu/drm/etnaviv/etnaviv_gpu.h b/drivers/gpu/drm/etnaviv/etnaviv_gpu.h
+--- a/drivers/gpu/drm/etnaviv/etnaviv_gpu.h
++++ b/drivers/gpu/drm/etnaviv/etnaviv_gpu.h
+@@ -106,7 +106,9 @@
+ 	ETNA_GPU_STATE_FAULT,
+ };
+ 
++struct etnaviv_t110;
+ struct etnaviv_gpu {
++	struct etnaviv_t110 *t110;
+ 	struct drm_device *drm;
+ 	struct thermal_cooling_device *cooling;
+ 	struct device *dev;
+diff --git a/drivers/gpu/drm/etnaviv/etnaviv_t110.c b/drivers/gpu/drm/etnaviv/etnaviv_t110.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/gpu/drm/etnaviv/etnaviv_t110.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Board-scoped SM-T110 GC1000 devfreq. Busy time is the union of queued
++ * hardware-job intervals through fence IRQ completion, not CPU load.
++ */
++#include <linux/clk.h>
++#include <linux/devfreq.h>
++#include <linux/moduleparam.h>
++#include <linux/of.h>
++#include <linux/pm_opp.h>
++#include <linux/pm_qos.h>
++#include <linux/pm_runtime.h>
++#include <linux/spinlock.h>
++#include <linux/ktime.h>
++#include "etnaviv_gpu.h"
++#include "etnaviv_t110.h"
++
++static bool t110_auto;
++module_param(t110_auto,bool,0444);
++struct etnaviv_t110 {
++	struct etnaviv_gpu *gpu;
++	struct devfreq *df;
++	struct devfreq_dev_profile profile;
++	struct devfreq_simple_ondemand_data governor;
++	struct dev_pm_qos_request thermal_qos;
++	spinlock_t lock;
++	u64 last,sample,busy_ns;
++	u64 submitted,completed;
++	unsigned int jobs,util,transitions;
++};
++static const unsigned long rates[]={156000000,312000000,416000000,624000000};
++static void account(struct etnaviv_t110 *d,u64 t)
++{
++	if(d->jobs)d->busy_ns+=t-d->last;
++	d->last=t;
++}
++void etnaviv_t110_busy(struct etnaviv_gpu *gpu,int delta)
++{
++	struct etnaviv_t110 *d=READ_ONCE(gpu->t110);
++	unsigned long flags;
++	if(!d)return;
++	spin_lock_irqsave(&d->lock,flags);account(d,ktime_get_ns());
++	if(delta>0){d->jobs++;d->submitted++;}
++	else if(d->jobs){d->jobs--;d->completed++;}
++	spin_unlock_irqrestore(&d->lock,flags);
++}
++void etnaviv_t110_reset(struct etnaviv_gpu *gpu)
++{
++	struct etnaviv_t110 *d=gpu->t110;
++	unsigned long flags;
++	if(!d)return;
++	spin_lock_irqsave(&d->lock,flags);account(d,ktime_get_ns());d->jobs=0;
++	spin_unlock_irqrestore(&d->lock,flags);
++}
++static int target(struct device *dev,unsigned long *freq,u32 flags)
++{
++	struct etnaviv_gpu *gpu=dev_get_drvdata(dev);
++	struct dev_pm_opp *opp;
++	unsigned long before;
++	int ret,active;
++	opp=devfreq_recommended_opp(dev,freq,flags);
++	if(IS_ERR(opp))return PTR_ERR(opp);
++	dev_pm_opp_put(opp);
++	/* Taking an existing runtime reference prevents suspend during a live
++ * transition. A suspended GPU only updates the provider's resume target.
++ */
++	active=pm_runtime_get_if_in_use(dev);if(active<0)return active;
++	mutex_lock(&gpu->lock);
++	before=clk_get_rate(gpu->clk_core);
++	ret=clk_set_rate(gpu->clk_core,*freq);
++	*freq=clk_get_rate(gpu->clk_core);
++	if(!ret){
++		gpu->fe_waitcycles=clamp(*freq>>15,200UL,0xffffUL);
++		if(before!=*freq)gpu->t110->transitions++;
++	}
++	mutex_unlock(&gpu->lock);
++	if(active)pm_runtime_put_autosuspend(dev);
++	return ret;
++}
++static int status(struct device *dev,struct devfreq_dev_status *s)
++{
++	struct etnaviv_gpu *gpu=dev_get_drvdata(dev);
++	struct etnaviv_t110 *d=gpu->t110;
++	u64 t=ktime_get_ns(),total,busy;
++	unsigned long flags;
++	spin_lock_irqsave(&d->lock,flags);account(d,t);
++	total=t-d->sample;busy=min(d->busy_ns,total);
++	d->sample=t;d->busy_ns=0;d->util=total?div64_u64(busy*100,total):0;
++	spin_unlock_irqrestore(&d->lock,flags);
++	s->current_frequency=clk_get_rate(gpu->clk_core);
++	s->total_time=min_t(u64,div_u64(total,1000),ULONG_MAX);
++	s->busy_time=min_t(u64,div_u64(busy,1000),ULONG_MAX);
++	return 0;
++}
++static int get_current_freq(struct device *dev,unsigned long *freq)
++{
++	struct etnaviv_gpu *gpu=dev_get_drvdata(dev);
++	*freq=clk_get_rate(gpu->clk_core);return 0;
++}
++static ssize_t gpu_load_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++	struct etnaviv_gpu *gpu=dev_get_drvdata(dev);
++	struct etnaviv_t110 *d=gpu->t110;
++	unsigned long flags;
++	int n;
++	spin_lock_irqsave(&d->lock,flags);
++	n=sysfs_emit(buf,"utilization_pct=%u active_jobs=%u submitted=%llu completed=%llu transitions=%u thermal_state=%u\n",d->util,d->jobs,d->submitted,d->completed,d->transitions,gpu->freq_scale);
++	spin_unlock_irqrestore(&d->lock,flags);return n;
++}
++static DEVICE_ATTR_RO(gpu_load);
++int etnaviv_t110_cooling(struct etnaviv_gpu *gpu,unsigned long state)
++{
++	int ret=0;
++	if(state>3)return -EINVAL;
++	if(gpu->t110)ret=dev_pm_qos_update_request(&gpu->t110->thermal_qos,rates[3-state]/1000);
++	if(ret<0)return ret;
++	gpu->freq_scale=state;return 0;
++}
++int etnaviv_t110_init(struct etnaviv_gpu *gpu)
++{
++	struct etnaviv_t110 *d;
++	int i,ret;
++	if(!of_machine_is_compatible("samsung,goyawifi") ||
++	   !of_property_read_bool(gpu->dev->of_node,"samsung,t110-gpu-scaling"))return 0;
++	if(gpu->identity.model!=0x1000 || gpu->identity.revision!=0x5037)return -ENODEV;
++	d=kzalloc(sizeof(*d),GFP_KERNEL);if(!d)return -ENOMEM;
++	d->gpu=gpu;spin_lock_init(&d->lock);d->last=d->sample=ktime_get_ns();
++	for(i=0;i<ARRAY_SIZE(rates);i++){
++		ret=dev_pm_opp_add(gpu->dev,rates[i],1175000);if(ret)goto opp_fail;
++	}
++	ret=dev_pm_qos_add_request(gpu->dev,&d->thermal_qos,DEV_PM_QOS_MAX_FREQUENCY,rates[3-gpu->freq_scale]/1000);
++	if(ret<0)goto opp_fail;
++	d->profile=(struct devfreq_dev_profile){.initial_freq=156000000,.polling_ms=100,.target=target,.get_dev_status=status,.get_cur_freq=get_current_freq};
++	d->governor=(struct devfreq_simple_ondemand_data){.upthreshold=40,.downdifferential=20};
++	WRITE_ONCE(gpu->t110,d);
++	d->df=devfreq_add_device(gpu->dev,&d->profile,t110_auto?DEVFREQ_GOV_SIMPLE_ONDEMAND:DEVFREQ_GOV_USERSPACE,&d->governor);
++	if(IS_ERR(d->df)){ret=PTR_ERR(d->df);goto qos_fail;}
++	ret=device_create_file(gpu->dev,&dev_attr_gpu_load);
++	if(ret){devfreq_remove_device(d->df);goto qos_fail;}
++	dev_info(gpu->dev,"T110_GPU_U: 156/312/416/624MHz devfreq, shared VL2 floor; auto=%u\n",t110_auto);
++	return 0;
++qos_fail:
++	WRITE_ONCE(gpu->t110,NULL);dev_pm_qos_remove_request(&d->thermal_qos);
++opp_fail:
++	while(i--)dev_pm_opp_remove(gpu->dev,rates[i]);
++	kfree(d);return ret;
++}
++void etnaviv_t110_fini(struct etnaviv_gpu *gpu)
++{
++	struct etnaviv_t110 *d=gpu->t110;
++	int i;
++	if(!d)return;
++	device_remove_file(gpu->dev,&dev_attr_gpu_load);devfreq_remove_device(d->df);
++	dev_pm_qos_remove_request(&d->thermal_qos);
++	WRITE_ONCE(gpu->t110,NULL);
++	/* Unbind already requires no new submissions. Drain its IRQ readers. */
++	synchronize_irq(gpu->irq);
++	for(i=0;i<ARRAY_SIZE(rates);i++)dev_pm_opp_remove(gpu->dev,rates[i]);
++	kfree(d);
++}
+diff --git a/drivers/gpu/drm/etnaviv/etnaviv_t110.h b/drivers/gpu/drm/etnaviv/etnaviv_t110.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/gpu/drm/etnaviv/etnaviv_t110.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef ETNAVIV_T110_H
++#define ETNAVIV_T110_H
++struct etnaviv_gpu;
++struct etnaviv_t110;
++#if IS_ENABLED(CONFIG_DRM_ETNAVIV_T110)
++int etnaviv_t110_init(struct etnaviv_gpu *gpu);
++void etnaviv_t110_fini(struct etnaviv_gpu *gpu);
++void etnaviv_t110_busy(struct etnaviv_gpu *gpu,int delta);
++void etnaviv_t110_reset(struct etnaviv_gpu *gpu);
++int etnaviv_t110_cooling(struct etnaviv_gpu *gpu,unsigned long state);
++#else
++static inline int etnaviv_t110_init(struct etnaviv_gpu *gpu){return 0;}
++static inline void etnaviv_t110_fini(struct etnaviv_gpu *gpu){}
++static inline void etnaviv_t110_busy(struct etnaviv_gpu *gpu,int delta){}
++static inline void etnaviv_t110_reset(struct etnaviv_gpu *gpu){}
++static inline int etnaviv_t110_cooling(struct etnaviv_gpu *gpu,unsigned long state){return -EOPNOTSUPP;}
++#endif
++#endif
+diff --git a/drivers/gpu/drm/tiny/Kconfig b/drivers/gpu/drm/tiny/Kconfig
+--- a/drivers/gpu/drm/tiny/Kconfig
++++ b/drivers/gpu/drm/tiny/Kconfig
+@@ -215,3 +215,10 @@
+ 	  * 4.40" Sharp Memory LCD (LS044Q7DH01)
+ 
+ 	  If M is selected the module will be called sharp_memory.
++
++config DRM_T110
++	tristate "SM-T110 fixed-panel LCD KMS"
++	depends on DRM && OF
++	select DRM_GEM_DMA_HELPER
++	select DRM_KMS_HELPER
++	select DRM_CLIENT_SELECTION
+diff --git a/drivers/gpu/drm/tiny/Makefile b/drivers/gpu/drm/tiny/Makefile
+--- a/drivers/gpu/drm/tiny/Makefile
++++ b/drivers/gpu/drm/tiny/Makefile
+@@ -15,3 +15,5 @@
+ obj-$(CONFIG_TINYDRM_MI0283QT)		+= mi0283qt.o
+ obj-$(CONFIG_TINYDRM_REPAPER)		+= repaper.o
+ obj-$(CONFIG_TINYDRM_SHARP_MEMORY)	+= sharp-memory.o
++
++obj-$(CONFIG_DRM_T110) += t110-drm.o
+diff --git a/drivers/gpu/drm/tiny/t110-drm.c b/drivers/gpu/drm/tiny/t110-drm.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/gpu/drm/tiny/t110-drm.c
+@@ -0,0 +1,375 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Fixed-mode goyawifi LCD/DSI host initialization and CMA scanout. */
++#include <linux/aperture.h>
++#include <linux/backlight.h>
++#include <linux/t110-board.h>
++#include <linux/mutex.h>
++#include <linux/dma-mapping.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/i2c.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include "t110-host.h"
++#include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_blend.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_fb_dma_helper.h>
++#include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_gem_dma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_managed.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_modeset_helper.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_simple_kms_helper.h>
++#include <drm/drm_vblank.h>
++
++#define GRA_ADDR 0x0f4
++#define GRA_PITCH 0x0fc
++#define GRA_SIZE 0x104
++#define DMA_CTRL 0x190
++#define IRQ_ENA 0x1c0
++#define IRQ_ISR 0x1c4
++#define VSYNC BIT(23)
++
++struct t110_drm {
++ struct drm_device drm;
++ struct drm_simple_display_pipe pipe;
++ struct drm_connector connector;
++ struct drm_display_mode mode;
++ void __iomem *regs;
++ void __iomem *dsi,*lcd_clk,*dsi_clk;
++ struct device_link *panel_link;
++ int irq;
++ unsigned int host_starts;
++ struct mutex bootstrap_lock;
++ bool system_suspended,bridge_host_ready;
++ spinlock_t irq_lock;
++ u32 boot_addr, boot_pitch;
++ u32 sleep_dma;
++};
++static struct t110_drm *bootstrap_host;
++static bool linux_init=true;
++module_param(linux_init,bool,0444);
++MODULE_PARM_DESC(linux_init,"Initialize fixed LCD/DSI host instead of retaining bootloader state");
++static inline struct t110_drm *to_t110(struct drm_device *d)
++{ return container_of(d,struct t110_drm,drm); }
++
++static void t110_start_host(struct t110_drm *t,u32 addr,u32 pitch)
++{
++ t110_host_program(t->regs,t->dsi,t->lcd_clk,t->dsi_clk,addr,pitch);
++ t->host_starts++;
++ dev_info(t->drm.dev,"T110_HOST: initialized LCD/DSI start=%u LCD=%08x DSI=%08x\n",
++          t->host_starts,readl(t->lcd_clk),readl(t->dsi_clk));
++}
++static void t110_start_command_host(struct t110_drm *t)
++{
++ t110_host_program_mode(t->regs,t->dsi,t->lcd_clk,t->dsi_clk,
++                        t->boot_addr,t->boot_pitch,false);
++ t->host_starts++;
++ dev_info(t->drm.dev,"T110_HOST: command-only initialization start=%u DMA=%08x\n",
++          t->host_starts,readl(t->regs+DMA_CTRL));
++}
++static ssize_t host_state_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ struct t110_drm *t=dev_get_drvdata(dev);
++ return sysfs_emit(buf,"linux_init=%d starts=%u lcd_clock=%08x dsi_clock=%08x\n",
++                   linux_init,t->host_starts,readl(t->lcd_clk),readl(t->dsi_clk));
++}
++static DEVICE_ATTR_RO(host_state);
++static void t110_delete_panel_link(void *data){device_link_del(data);}
++static int t110_modes(struct drm_connector *connector)
++{
++ struct drm_display_mode *mode=drm_mode_duplicate(connector->dev,&to_t110(connector->dev)->mode);
++ if(!mode)return -ENOMEM;
++ mode->type=DRM_MODE_TYPE_DRIVER|DRM_MODE_TYPE_PREFERRED;
++ drm_mode_probed_add(connector,mode);
++ connector->display_info.width_mm=154;connector->display_info.height_mm=90;
++ return 1;
++}
++static const struct drm_connector_helper_funcs t110_connector_helper={.get_modes=t110_modes};
++static const struct drm_connector_funcs t110_connector_funcs={
++ .fill_modes=drm_helper_probe_single_connector_modes,
++ .destroy=drm_connector_cleanup,.reset=drm_atomic_helper_connector_reset,
++ .atomic_duplicate_state=drm_atomic_helper_connector_duplicate_state,
++ .atomic_destroy_state=drm_atomic_helper_connector_destroy_state,
++};
++static enum drm_mode_status t110_mode_valid(struct drm_simple_display_pipe *pipe,const struct drm_display_mode *mode)
++{
++ return drm_mode_equal(mode,&to_t110(pipe->crtc.dev)->mode)?MODE_OK:MODE_BAD;
++}
++static int t110_check(struct drm_simple_display_pipe *pipe,struct drm_plane_state *ps,struct drm_crtc_state *cs)
++{
++ if(ps->fb && (ps->fb->pitches[0]!=4096 || ps->src_x || ps->src_y))return -EINVAL;
++ return 0;
++}
++static void t110_scanout(struct drm_simple_display_pipe *pipe)
++{
++ struct t110_drm *t=to_t110(pipe->crtc.dev);
++ struct drm_plane_state *ps=pipe->plane.state;
++ struct drm_framebuffer *fb=ps->fb;
++ dma_addr_t addr;
++ if(!fb)return;
++ addr=drm_fb_dma_get_gem_addr(fb,ps,0);
++ /* All allocations/imports use the 32-bit DMA API and contiguous backing. */
++ dma_wmb();
++ writel((readl(t->regs+GRA_PITCH)&0xffff0000)|fb->pitches[0],t->regs+GRA_PITCH);
++ writel(lower_32_bits(addr),t->regs+GRA_ADDR);
++ readl(t->regs+GRA_ADDR);
++}
++/* The bridge needs this host to initialize before registering its backlight.
++ * Resolve the existing board backlight at modeset time, without introducing a
++ * reciprocal probe dependency. Use the backlight core's normal power state so
++ * compositor DPMS and system PM share the same restore rules.
++ */
++static void t110_backlight(struct t110_drm *t, bool enable)
++{
++ struct backlight_device *bl=backlight_device_get_by_name("t110-backlight");
++ int ret;
++ if(!bl)return;
++ ret=enable?backlight_enable(bl):backlight_disable(bl);
++ if(ret)dev_err_ratelimited(t->drm.dev,"backlight power %u failed: %d\n",enable,ret);
++ put_device(&bl->dev);
++}
++static void t110_enable(struct drm_simple_display_pipe *pipe,struct drm_crtc_state *cs,struct drm_plane_state *ps)
++{
++ t110_scanout(pipe);
++ drm_crtc_vblank_on(&pipe->crtc);
++ t110_backlight(to_t110(pipe->crtc.dev),true);
++}
++static void t110_disable(struct drm_simple_display_pipe *pipe)
++{
++ struct t110_drm *t=to_t110(pipe->crtc.dev);
++ t110_backlight(t,false);
++ drm_crtc_vblank_off(&pipe->crtc);
++ /* Keep the already initialized panel alive; restore reserved boot memory. */
++ writel(t->boot_pitch,t->regs+GRA_PITCH);writel(t->boot_addr,t->regs+GRA_ADDR);
++}
++static void t110_update(struct drm_simple_display_pipe *pipe,struct drm_plane_state *old)
++{
++ struct drm_crtc *crtc=&pipe->crtc;
++ struct drm_pending_vblank_event *event=crtc->state->event;
++ t110_scanout(pipe);
++ if(event) {
++  crtc->state->event=NULL;
++  spin_lock_irq(&crtc->dev->event_lock);
++  if(crtc->state->active && !drm_crtc_vblank_get(crtc))drm_crtc_arm_vblank_event(crtc,event);
++  else drm_crtc_send_vblank_event(crtc,event);
++  spin_unlock_irq(&crtc->dev->event_lock);
++ }
++}
++static int t110_vblank_enable(struct drm_simple_display_pipe *pipe)
++{
++ struct t110_drm *t=to_t110(pipe->crtc.dev);unsigned long flags;
++ spin_lock_irqsave(&t->irq_lock,flags);
++ writel(~VSYNC,t->regs+IRQ_ISR);writel(VSYNC,t->regs+IRQ_ENA);
++ spin_unlock_irqrestore(&t->irq_lock,flags);return 0;
++}
++static void t110_vblank_disable(struct drm_simple_display_pipe *pipe)
++{
++ struct t110_drm *t=to_t110(pipe->crtc.dev);unsigned long flags;
++ spin_lock_irqsave(&t->irq_lock,flags);writel(0,t->regs+IRQ_ENA);spin_unlock_irqrestore(&t->irq_lock,flags);
++}
++static irqreturn_t t110_irq(int irq,void *data)
++{
++ struct t110_drm *t=data;u32 status=readl(t->regs+IRQ_ISR);
++ if(!(status & readl(t->regs+IRQ_ENA) & VSYNC))return IRQ_NONE;
++ writel(~VSYNC,t->regs+IRQ_ISR);
++ drm_crtc_handle_vblank(&t->pipe.crtc);return IRQ_HANDLED;
++}
++static const struct drm_simple_display_pipe_funcs t110_pipe_funcs={
++ .mode_valid=t110_mode_valid,.check=t110_check,.enable=t110_enable,
++ .disable=t110_disable,.update=t110_update,
++ .enable_vblank=t110_vblank_enable,.disable_vblank=t110_vblank_disable,
++};
++static const struct drm_mode_config_funcs t110_mode_funcs={
++ .fb_create=drm_gem_fb_create,.atomic_check=drm_atomic_helper_check,.atomic_commit=drm_atomic_helper_commit,
++};
++DEFINE_DRM_GEM_DMA_FOPS(t110_fops);
++static const struct drm_driver t110_driver={
++ .driver_features=DRIVER_GEM|DRIVER_MODESET|DRIVER_ATOMIC,
++ .name="t110-drm",.desc="SM-T110 fixed-panel LCD",.major=1,.minor=0,
++ .fops=&t110_fops,DRM_GEM_DMA_DRIVER_OPS,DRM_FBDEV_DMA_DRIVER_OPS,
++};
++static int t110_probe(struct platform_device *pdev)
++{
++ struct device *dev=&pdev->dev;struct t110_drm *t;struct drm_device *drm;
++ static const u32 formats[]={DRM_FORMAT_XRGB8888};
++ static const u64 modifiers[]={DRM_FORMAT_MOD_LINEAR,DRM_FORMAT_MOD_INVALID};
++ u32 ctrl,total,hp,vp;int ret,irq;
++ if(!of_machine_is_compatible("samsung,goyawifi"))return -ENODEV;
++ t=devm_drm_dev_alloc(dev,&t110_driver,struct t110_drm,drm);
++ if(IS_ERR(t))return PTR_ERR(t);
++ drm=&t->drm;spin_lock_init(&t->irq_lock);mutex_init(&t->bootstrap_lock);
++ t->regs=devm_platform_ioremap_resource(pdev,0);if(IS_ERR(t->regs))return PTR_ERR(t->regs);
++ t->dsi=devm_ioremap(dev,0xd420b800,0x200);
++ t->lcd_clk=devm_ioremap(dev,0xd428284c,4);
++ t->dsi_clk=devm_ioremap(dev,0xd4282844,4);
++ if(!t->dsi||!t->lcd_clk||!t->dsi_clk)return -ENOMEM;
++ if(linux_init) {
++  /* Reserved scanout is a safe temporary address until GEM/fbdev takes over.
++   * No bootloader timing, format or address readback is required. */
++  t->boot_addr=0x17000000;t->boot_pitch=4096;
++  t110_host_bus_enable(t->lcd_clk);
++  writel(0x0000fff0,t->regs+0x1dc);readl(t->regs+0x1dc);
++  writel(0,t->regs+IRQ_ENA);
++  t110_host_stop(t->regs,t->dsi,t->lcd_clk,t->dsi_clk);
++  t110_start_host(t,t->boot_addr,t->boot_pitch);
++  /* LCD counters run at 78MHz; physical panel is 1367x633 at ~60.1Hz. */
++  t->mode=(struct drm_display_mode){.clock=78000,.hdisplay=1024,
++   .hsync_start=1720,.hsync_end=1900,.htotal=2050,.vdisplay=600,
++   .vsync_start=613,.vsync_end=623,.vtotal=633,
++   .flags=DRM_MODE_FLAG_PHSYNC|DRM_MODE_FLAG_PVSYNC};
++ }else {
++ t->boot_addr=readl(t->regs+GRA_ADDR);t->boot_pitch=readl(t->regs+GRA_PITCH);
++ ctrl=readl(t->regs+DMA_CTRL);
++ if(t->boot_addr!=0x17000000 || (t->boot_pitch&0xffff)!=4096 ||
++    readl(t->regs+GRA_SIZE)!=0x02580400 || (ctrl&0x000f0000)!=0x00040000 ||
++    !(ctrl&BIT(8)) || !(ctrl&BIT(12)) || (ctrl&(BIT(15)|BIT(9))))return -EINVAL;
++ total=readl(t->regs+0x114);hp=readl(t->regs+0x11c);vp=readl(t->regs+0x120);
++ t->mode=(struct drm_display_mode){.hdisplay=1024,.vdisplay=600,
++  .htotal=total&0xffff,.vtotal=total>>16,
++  .hsync_start=1024+(hp&0xffff),.hsync_end=(total&0xffff)-(hp>>16),
++  .vsync_start=600+(vp&0xffff),.vsync_end=(total>>16)-(vp>>16),
++  .flags=DRM_MODE_FLAG_PHSYNC|DRM_MODE_FLAG_PVSYNC};
++ if(t->mode.htotal<1024 || t->mode.vtotal<600 ||
++    t->mode.hsync_end<t->mode.hsync_start || t->mode.vsync_end<t->mode.vsync_start)return -EINVAL;
++ t->mode.clock=DIV_ROUND_CLOSEST(t->mode.htotal*t->mode.vtotal*60,1000);
++ }
++ drm_mode_set_name(&t->mode);
++ ret=dma_set_mask_and_coherent(dev,DMA_BIT_MASK(32));if(ret)return ret;
++ ret=drmm_mode_config_init(drm);if(ret)return ret;
++ drm->mode_config.min_width=1024;drm->mode_config.max_width=1024;
++ drm->mode_config.min_height=600;drm->mode_config.max_height=600;
++ drm->mode_config.funcs=&t110_mode_funcs;
++ ret=drm_connector_init(drm,&t->connector,&t110_connector_funcs,DRM_MODE_CONNECTOR_DSI);if(ret)return ret;
++ drm_connector_helper_add(&t->connector,&t110_connector_helper);
++ ret=drm_simple_display_pipe_init(drm,&t->pipe,&t110_pipe_funcs,formats,ARRAY_SIZE(formats),modifiers,&t->connector);if(ret)return ret;
++ ret=drm_plane_create_blend_mode_property(&t->pipe.plane,BIT(DRM_MODE_BLEND_PIXEL_NONE)|BIT(DRM_MODE_BLEND_PREMULTI));if(ret)return ret;
++ ret=drm_vblank_init(drm,1);if(ret)return ret;
++ irq=platform_get_irq(pdev,0);if(irq<0)return irq;t->irq=irq;
++ writel(0,t->regs+IRQ_ENA);writel(~VSYNC,t->regs+IRQ_ISR);
++ ret=devm_request_irq(dev,irq,t110_irq,0,dev_name(dev),t);if(ret)return ret;
++ ret=aperture_remove_conflicting_devices(t->boot_addr,4096*600,"t110-drm");if(ret)return ret;
++ drm_mode_config_reset(drm);platform_set_drvdata(pdev,t);
++ /* Panel/I2C work suspends before host clocks stop and resumes after the
++  * host has been reconstructed. The shared touch/bridge rails stay owned
++  * by their existing drivers. */
++ {
++  struct device *panel=bus_find_device_by_name(&i2c_bus_type,NULL,"1-0064");
++  if(!panel)return -EPROBE_DEFER;
++  t->panel_link=device_link_add(panel,dev,DL_FLAG_STATELESS);
++  put_device(panel);
++  if(!t->panel_link)return -EINVAL;
++  ret=devm_add_action_or_reset(dev,t110_delete_panel_link,t->panel_link);if(ret)return ret;
++ }
++ ret=device_create_file(dev,&dev_attr_host_state);if(ret)return ret;
++ ret=drm_dev_register(drm,0);if(ret){device_remove_file(dev,&dev_attr_host_state);return ret;}
++ drm_client_setup_with_fourcc(drm,DRM_FORMAT_XRGB8888);
++ WRITE_ONCE(bootstrap_host,t);
++ dev_info(dev,"T110_KMS_S: %dx%d totals %dx%d fixed panel, CMA scanout, IRQ %d\n",1024,600,t->mode.htotal,t->mode.vtotal,irq);
++ return 0;
++}
++/* Reuse DRM's saved atomic state so no live compositor scans buffers while
++ * the bridge is reset. Every exit rebuilds the host and restores scanout. */
++int t110_display_bootstrap(int (*action)(void *),void *data)
++{
++ struct t110_drm *t=READ_ONCE(bootstrap_host);int ret,restore;
++ if(!t)return -EPROBE_DEFER;
++ if(!linux_init || !action)return -EOPNOTSUPP;
++ mutex_lock(&t->bootstrap_lock);
++ ret=drm_mode_config_helper_suspend(&t->drm);if(ret)goto out;
++ disable_irq(t->irq);
++ t110_host_stop(t->regs,t->dsi,t->lcd_clk,t->dsi_clk);
++ t110_start_command_host(t);
++ /* One-lane LP command mode, fresh CPU packet FIFO after full host reset. */
++ writel(0,t->dsi);readl(t->dsi);
++ writel(1,t->dsi+0x84);writel(0x10,t->dsi+0x88);
++ writel(BIT(20),t->dsi+0x24);msleep(32);
++ ret=action(data);
++ t110_start_host(t,t->boot_addr,t->boot_pitch);
++ enable_irq(t->irq);
++ restore=drm_mode_config_helper_resume(&t->drm);if(restore)ret=restore;
++out:
++ mutex_unlock(&t->bootstrap_lock);return ret;
++}
++EXPORT_SYMBOL_GPL(t110_display_bootstrap);
++
++/* Early system resume: I2C pins are still parked, userspace frozen and
++ * DRM atomic state already suspended. Do not nest the normal PM helpers. */
++int t110_display_resume_bridge(int (*action)(void *),void *data)
++{
++ struct t110_drm *t=READ_ONCE(bootstrap_host);int ret;
++ if(!t || !t->system_suspended || !linux_init || !action)return -EINVAL;
++ mutex_lock(&t->bootstrap_lock);
++ t110_host_bus_enable(t->lcd_clk);
++ t110_start_command_host(t);
++ writel(0,t->dsi);readl(t->dsi);
++ writel(1,t->dsi+0x84);writel(0x10,t->dsi+0x88);
++ writel(BIT(20),t->dsi+0x24);msleep(32);
++ ret=action(data);
++ /* Complete the normal four-lane host setup BEFORE I2C reconnects. Keep
++  * its clocks stable after bridge I2C access starts; regular DRM resume
++  * restores only scanout/IRQ rather than resetting the host a second time. */
++ if(!ret){
++  t110_start_host(t,t->boot_addr,t->boot_pitch);
++  writel(readl(t->regs+DMA_CTRL)&~(BIT(0)|BIT(8)),t->regs+DMA_CTRL);
++  readl(t->regs+DMA_CTRL);t->bridge_host_ready=true;
++ }else{
++  t110_host_stop(t->regs,t->dsi,t->lcd_clk,t->dsi_clk);
++  t->bridge_host_ready=false;
++ }
++ dev_info(t->drm.dev,"T110_BRIDGE_PM: early DSI bootstrap result=%d\n",ret);
++ mutex_unlock(&t->bootstrap_lock);return ret;
++}
++EXPORT_SYMBOL_GPL(t110_display_resume_bridge);
++
++static void t110_remove(struct platform_device *pdev)
++{
++ struct t110_drm *t=platform_get_drvdata(pdev);
++ WRITE_ONCE(bootstrap_host,NULL);
++ device_remove_file(&pdev->dev,&dev_attr_host_state);
++ drm_dev_unregister(&t->drm);drm_atomic_helper_shutdown(&t->drm);
++}
++static void t110_shutdown(struct platform_device *pdev)
++{ struct t110_drm *t=platform_get_drvdata(pdev);drm_atomic_helper_shutdown(&t->drm); }
++static int t110_drm_suspend(struct device *dev)
++{
++ struct t110_drm *t=dev_get_drvdata(dev);int ret;
++ ret=drm_mode_config_helper_suspend(&t->drm);if(ret)return ret;
++ t->sleep_dma=readl(t->regs+DMA_CTRL);
++ writel(t->sleep_dma & ~(BIT(0)|BIT(8)),t->regs+DMA_CTRL);
++ readl(t->regs+DMA_CTRL);
++ /* Drain the last graphics fetch while preserving LCD/DSI timings. */
++ msleep(20);
++ if(linux_init){disable_irq(t->irq);t110_host_stop(t->regs,t->dsi,t->lcd_clk,t->dsi_clk);}
++ t->system_suspended=true;t->bridge_host_ready=false;
++ dev_info(dev,"T110_HOST: suspend functional clocks LCD=%08x DSI=%08x\n",readl(t->lcd_clk),readl(t->dsi_clk));
++ return 0;
++}
++static int t110_drm_resume(struct device *dev)
++{
++ struct t110_drm *t=dev_get_drvdata(dev);
++ if(linux_init){
++  if(!t->bridge_host_ready)t110_start_host(t,t->boot_addr,t->boot_pitch);
++  t->bridge_host_ready=false;enable_irq(t->irq);
++ }
++ writel(t->sleep_dma,t->regs+DMA_CTRL);readl(t->regs+DMA_CTRL);
++ t->system_suspended=false;
++ return drm_mode_config_helper_resume(&t->drm);
++}
++static DEFINE_SIMPLE_DEV_PM_OPS(t110_drm_pm,t110_drm_suspend,t110_drm_resume);
++static const struct of_device_id t110_of_match[]={{.compatible="samsung,t110-lcd-handoff"},{}};
++MODULE_DEVICE_TABLE(of,t110_of_match);
++static struct platform_driver t110_platform_driver={.probe=t110_probe,.remove=t110_remove,.shutdown=t110_shutdown,
++ .driver={.name="t110-drm",.of_match_table=t110_of_match,.pm=pm_sleep_ptr(&t110_drm_pm)}};
++module_platform_driver(t110_platform_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SM-T110 fixed LCD/DSI host initialization and KMS scanout");
+diff --git a/drivers/gpu/drm/tiny/t110-host.h b/drivers/gpu/drm/tiny/t110-host.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/gpu/drm/tiny/t110-host.h
+@@ -0,0 +1,104 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* goyawifi fixed RGB888/four-lane host setup. Vendor pxa688_phy.c and
++ * board-goya-display.c, verified against this board's working register set.
++ * The VX5B3D bridge and its rails are managed separately. */
++struct t110_reg {u16 offset;u32 value;};
++static void t110_host_bus_enable(void __iomem *lcd_clk)
++{
++ /* Retain the shared AXI source/divider policy, but explicitly own the
++  * required gate/reset release. Camera uses these same bus domains. */
++ writel(readl(lcd_clk)|BIT(16)|BIT(3)|BIT(5)|BIT(2),lcd_clk);
++ readl(lcd_clk);udelay(10);
++}
++static const struct t110_reg t110_dsi_config[]={
++ /* FIFO allocation, timeout counters and four-lane LP command mask. */
++ {0x14,0},{0x24,0x00f00000},{0x8c,0},
++ /* Board D-PHY timings, 52MHz escape clock, 312MHz lane bit clock. */
++ {0xc0,0x06070603},{0xc4,0x0e0bcd98},{0xc8,0x06040c02},{0xcc,0x0000023c},
++ {0xe0,0x00066666},{0xe4,0xffffffff},{0xe8,0xffffffff},{0xec,0xffffffff},
++ {0x100,0x00402010},
++ /* RGB888 sync-event video, HBP packet, VSYNC reset. */
++ {0x104,BIT(31)|BIT(18)|(1<<2)|3},
++ /* 1024x600, HFP123/HBP100/HS120, VFP13/VBP10/VS10.
++  * Horizontal counters use bytes/lane with each interval truncated. */
++ {0x110,((1024*3/4)<<16)|(1024*3/4+123*3/4+100*3/4+120*3/4)},
++ {0x114,((120*3/4)<<16)|(100*3/4)},
++ {0x118,(600<<16)|633},{0x11c,(10<<16)|10},
++ {0x120,((120*3+100*3-4-6)<<16)},
++ {0x124,((123*3-12)<<16)|(1024*3)},
++ {0x128,(1367*3-4-6)},
++ {0x4,0xe4},
++};
++static void t110_dsi_program_mode(void __iomem *dsi,bool video)
++{
++ int i;
++ writel(0,dsi);readl(dsi);
++ /* Full DSI module + register reset, not just TX enable toggling. */
++ writel(BIT(31)|BIT(30),dsi);readl(dsi);usleep_range(1000,2000);
++ writel(0,dsi+0x84);writel(0,dsi);readl(dsi);usleep_range(1000,2000);
++ pr_info("T110_HOST: reset DSI video timing=%08x ctrl=%08x\n",readl(dsi+0x110),readl(dsi));
++ writel(readl(dsi+0xb0)|BIT(9),dsi+0xb0);
++ for(i=0;i<ARRAY_SIZE(t110_dsi_config);i++)
++  writel(t110_dsi_config[i].value,dsi+t110_dsi_config[i].offset);
++ writel(1,dsi+0x84);writel(0,dsi+0x88);udelay(10);
++ writel(video?0xf0:0x10,dsi+0x88);
++ if(!video)writel(BIT(20),dsi+0x24);
++ usleep_range(1000,2000);
++ writel(video?(BIT(8)|BIT(0)):0,dsi);readl(dsi);
++}
++
++static void t110_host_stop(void __iomem *lcd,void __iomem *dsi,
++                           void __iomem *lcd_clk,void __iomem *dsi_clk)
++{
++ writel(readl(lcd+0x190)&~(BIT(0)|BIT(8)),lcd+0x190);readl(lcd+0x190);
++ msleep(20); /* drain the last LCD fetch before stopping its clock */
++ writel(0,dsi);readl(dsi);writel(0,dsi+0x88);writel(0,dsi+0x84);
++ writel(0,lcd+0x1b8);
++ writel(readl(lcd+0x1a8)|BIT(28),lcd+0x1a8);readl(lcd+0x1a8);
++ /* LCD functional and DSI PHY gates only. Never reset/gate the shared
++  * LCD/CCIC/ISP AXI or HCLK domains here. */
++ writel(readl(dsi_clk)&~(BIT(2)|BIT(5)),dsi_clk);readl(dsi_clk);
++ writel(readl(lcd_clk)&~BIT(4),lcd_clk);readl(lcd_clk);
++}
++static void t110_host_program_mode(void __iomem *lcd,void __iomem *dsi,
++                              void __iomem *lcd_clk,void __iomem *dsi_clk,
++                              u32 address,u32 pitch,bool video)
++{
++ u32 value;
++ /* PLL1_624, no LCD post division. Shared AXI/HCLK fields preserved. */
++ value=readl(lcd_clk)&~(BIT(6)|(31<<10));
++ writel(value|BIT(4)|BIT(1)|BIT(0),lcd_clk);readl(lcd_clk);
++ /* Vendor requires the global LCD arbitration setup before other LCD
++  * register access. Keep CMU/TV routing disabled for this panel-only pipe. */
++ writel(0x0000fff0,lcd+0x1dc);readl(lcd+0x1dc);
++ /* PXA986 escape clock: 52MHz, slow-clock preroll26; release PHY reset. */
++ value=(readl(dsi_clk)&~((31<<6)|3))|(26<<6)|BIT(2)|BIT(5);
++ writel(value,dsi_clk);udelay(10);
++ writel(value|BIT(3)|BIT(4),dsi_clk);readl(dsi_clk);
++ writel(0x40001208,lcd+0x1a8); /* vendor fixed LCD/DSI divider */
++ writel(0,lcd+0x190);writel(0,lcd+0x1b8);
++ writel(address,lcd+0xf4);writel(0,lcd+0xf8);writel(pitch,lcd+0xfc);
++ writel(0,lcd+0x100);writel((600<<16)|1024,lcd+0x104);
++ writel((600<<16)|1024,lcd+0x108);
++ writel((633<<16)|(1367*3/2),lcd+0x114);
++ writel((600<<16)|1024,lcd+0x118);
++ writel(((100*3/2)<<16)|((1024+123)*3/2-1024),lcd+0x11c);
++ writel((10<<16)|13,lcd+0x120);writel(0,lcd+0x124);
++ writel(0x01330133,lcd+0x13c);
++ /* Graphics SRAM, opaque RGBA8888 path, no video/cursor/palette fetch. */
++ writel(0,lcd+0x180);writel(0,lcd+0x198);writel(0,lcd+0x19c);
++ /* Explicit SRAM timing/power state; debug/frame counters are read-only. */
++ writel(0,lcd+0x1a0);writel(0,lcd+0x1a4);
++ writel(0,lcd+0x1cc);writel(0,lcd+0x1d0);
++ writel(0,lcd+0x1e0);writel(0,lcd+0x1e4);writel(0,lcd+0x1e8);
++ writel(0,lcd+0x188);writel(0x28320081,lcd+0x194);
++ writel((readl(lcd+0x1f4)&~0x350)|BIT(4)|BIT(6),lcd+0x1f4);
++ writel(0x10,lcd+0x1bc);
++ t110_dsi_program_mode(dsi,video);
++ writel(1,lcd+0x1b8);
++ dma_wmb();writel(video?0x08045140:0x08045040,lcd+0x190);readl(lcd+0x190);
++}
++static void t110_host_program(void __iomem *lcd,void __iomem *dsi,
++                              void __iomem *lcd_clk,void __iomem *dsi_clk,
++                              u32 address,u32 pitch)
++{t110_host_program_mode(lcd,dsi,lcd_clk,dsi_clk,address,pitch,true);}
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -1814,3 +1814,8 @@
+ endmenu
+ 
+ endif # VIDEO_DEV
++
++config VIDEO_SR200PC20M_T110
++	tristate "SM-T110 SR200PC20M camera"
++	depends on I2C && VIDEO_DEV
++	select V4L2_ASYNC
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -174,3 +174,5 @@
+ obj-$(CONFIG_VIDEO_WM8739) += wm8739.o
+ obj-$(CONFIG_VIDEO_WM8775) += wm8775.o
+ obj-$(CONFIG_VIDEO_INTEL_CVS) += cvs/
++
++obj-$(CONFIG_VIDEO_SR200PC20M_T110) += sr200pc20m-t110.o
+diff --git a/drivers/media/i2c/sr200pc20m-t110-regs.h b/drivers/media/i2c/sr200pc20m-t110-regs.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/media/i2c/sr200pc20m-t110-regs.h
+@@ -0,0 +1,30 @@
++/* sr200pc20m_regs_goya.h
++ *
++ * Driver for sr200pc20m (2MP Camera) from siliconfile
++ *
++ * Copyright (C) 2013, SAMSUNG ELECTRONICS
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * Change Date: 2013.12.19
++ */
++
++
++static const u16 sr_init_regs[]={
++0x0131,0x0133,0x0131,0x082f,0x0a00,0x0320,0x101c,0x0322,0x1069,0x0312,0x2000,0x2100,0x0313,0x10cb,0x0300,0x1011,0x1190,0x1204,0x0baa,0x0caa,0x0daa,0x2000,0x2102,0x2200,0x230a,0x2404,0x25b0,0x2606,0x2740,0x280c,0x2904,0x2a02,0x2b04,0x2c06,0x2d02,0x4001,0x4168,0x4200,0x4358,0x4409,0x4504,0x4618,0x47d8,0x802e,0x817e,0x8290,0x8300,0x840c,0x8500,0x900c,0x910c,0x92d0,0x93c8,0x94ff,0x95ff,0x96dc,0x97fe,0x9838,0xa000,0xa200,0xa400,0xa600,0xa843,0xaa43,0xac43,0xae43,0x9943,0x9a43,0x9b43,0x9c43,0x0302,0x1203,0x1303,0x1600,0x178C,0x184c,0x1900,0x1a39,0x1c09,0x1d40,0x1e30,0x1f10,0x2077,0x21de,0x22a7,0x2330,0x273c,0x2b80,0x2e00,0x2f00,0x3005,0x5020,0x511c,0x5201,0x53c1,0x54c0,0x551c,0x5611,0x5822,0x5920,0x5da2,0x5e5a,0x6087,0x6199,0x6288,0x6397,0x6488,0x6597,0x670c,0x680c,0x690c,0x7289,0x7396,0x7489,0x7596,0x7689,0x7796,0x7c85,0x7daf,0x8001,0x817f,0x8213,0x8324,0x847d,0x8581,0x867d,0x8781,0x9248,0x9354,0x947d,0x9581,0x967d,0x9781,0xa002,0xa17b,0xa202,0xa37b,0xa47b,0xa502,0xa67b,0xa702,0xa885,0xa98c,0xaa85,0xab8c,0xac10,0xad16,0xae10,0xaf16,0xb099,0xb1a3,0xb2a4,0xb3ae,0xb49b,0xb5a2,0xb6a6,0xb7ac,0xb89b,0xb99f,0xbaa6,0xbbaa,0xbc9b,0xbd9f,0xbea6,0xbfaa,0xc42c,0xc543,0xc663,0xc779,0xc82d,0xc942,0xca2d,0xcb42,0xcc64,0xcd78,0xce64,0xcf78,0xd00a,0xd109,0xd40c,0xd50c,0xd6d0,0xd7c8,0xe0c4,0xe1c4,0xe2c4,0xe3c4,0xe400,0xe880,0xe940,0xea7f,0xf001,0xf101,0xf201,0xf301,0xf401,0x0303,0x1010,0x0310,0x1001,0x1230,0x2000,0x3000,0x3100,0x3200,0x3300,0x3430,0x3500,0x3600,0x3800,0x3e58,0x4080,0x4100,0x6061,0x617a,0x6274,0x6350,0x6480,0x6642,0x6722,0x6a8a,0x6b86,0x6c7e,0x6d8e,0x7601,0x7904,0x0311,0x107f,0x1140,0x120a,0x13b9,0x2668,0x2762,0x280f,0x2910,0x2b30,0x2c32,0x3070,0x3110,0x3265,0x3309,0x3406,0x3504,0x3670,0x3718,0x3865,0x3909,0x3a06,0x3b04,0x3c80,0x3d18,0x3e80,0x3f0c,0x4009,0x4106,0x4280,0x4318,0x4480,0x450d,0x460a,0x4708,0x4888,0x492c,0x4a80,0x4b0f,0x4c0c,0x4d0b,0x4e80,0x4f23,0x5080,0x510f,0x520c,0x530c,0x5411,0x5517,0x5620,0x5701,0x5800,0x5900,0x5a18,0x5b00,0x5c00,0x603f,0x6250,0x7006,0x0312,0x2000,0x2100,0x2500,0x2800,0x2900,0x2a00,0x3050,0x3118,0x3232,0x3340,0x3450,0x3570,0x36a0,0x40a0,0x4140,0x42a0,0x4388,0x4488,0x4578,0x46b0,0x4755,0x48a0,0x4990,0x4a80,0x4b80,0x4cb0,0x4d40,0x4e88,0x4f98,0x5060,0x5170,0x52b0,0x5350,0x5490,0x5598,0x5670,0x5770,0x58a0,0x5940,0x5aa0,0x5ba0,0x5cb0,0x5d70,0x5e9c,0x5f40,0x60a0,0x61a0,0x62b0,0x6370,0x7015,0x7101,0x7218,0x7301,0x7425,0x7515,0x8020,0x8140,0x8265,0x851a,0x8800,0x8900,0x905d,0xD00c,0xD180,0xD217,0xD300,0xD400,0xd50f,0xD6ff,0xd7ff,0x3b06,0x3c06,0xc530,0xc62a,0x0313,0x10cb,0x117b,0x1207,0x1400,0x2015,0x2113,0x2233,0x2305,0x2409,0x250a,0x2618,0x2730,0x2912,0x2a50,0x2b06,0x2c06,0x2508,0x2d0c,0x2e12,0x2f12,0x5010,0x5114,0x5212,0x530c,0x540f,0x550c,0x5610,0x5713,0x5810,0x590c,0x5a0f,0x5b0c,0x5c0b,0x5d0c,0x5e0b,0x5f0a,0x600a,0x6109,0x6209,0x6309,0x6409,0x6507,0x6607,0x6707,0x6808,0x6908,0x6a08,0x6b06,0x6c06,0x6d06,0x6e08,0x6f08,0x7008,0x7106,0x7206,0x7306,0x8000,0x811f,0x8205,0x8331,0x9005,0x9105,0x9233,0x9330,0x9403,0x9514,0x9720,0x9920,0xa004,0xa105,0xa204,0xa305,0xa407,0xa508,0xa607,0xa708,0xa807,0xa908,0xaa07,0xab08,0xb022,0xb12a,0xb228,0xb322,0xb42a,0xb528,0xb622,0xb72a,0xb828,0xb922,0xba2a,0xbb28,0xbc25,0xbd2a,0xbe27,0xbf25,0xc02a,0xc127,0xc221,0xc325,0xc426,0xc525,0xc628,0xc726,0xc821,0xc925,0xca22,0xcb21,0xcc21,0xcd20,0xce21,0xcf25,0xd022,0xd121,0xd221,0xd320,0x0314,0x1011,0x1480,0x1580,0x1680,0x1780,0x1880,0x1980,0x2060,0x2180,0x2280,0x2380,0x2480,0x30c8,0x312b,0x3200,0x3300,0x3490,0x4034,0x5024,0x6020,0x7024,0x0315,0x100f,0x1446,0x1536,0x1626,0x172f,0x308f,0x3159,0x320a,0x3315,0x345b,0x3506,0x3607,0x3740,0x3887,0x4094,0x4120,0x4289,0x4384,0x4403,0x4501,0x4688,0x479c,0x4828,0x5003,0x5100,0x5283,0x5308,0x5411,0x5599,0x5603,0x570f,0x5892,0x8000,0x8580,0x8702,0x8800,0x8900,0x8a00,0x0316,0x1031,0x185e,0x195d,0x1a0e,0x1b01,0x1cdc,0x1dfe,0x3000,0x3109,0x321d,0x3333,0x3454,0x3572,0x368a,0x379a,0x38ac,0x39bb,0x3ac7,0x3bd2,0x3cdb,0x3de5,0x3eeb,0x3ff3,0x40f8,0x41fd,0x42ff,0x5000,0x5103,0x5219,0x5334,0x5458,0x5575,0x568d,0x57a1,0x58b2,0x59be,0x5ac9,0x5bd2,0x5cdb,0x5de3,0x5eeb,0x5ff0,0x60f5,0x61f7,0x62f8,0x7000,0x710e,0x721f,0x733f,0x745d,0x7575,0x768a,0x779c,0x78ad,0x79bb,0x7ac6,0x7bd1,0x7cda,0x7de3,0x7eea,0x7ff1,0x80f6,0x81fb,0x82ff,0x0317,0x10f7,0x0320,0x111c,0x1830,0x1a08,0x2005,0x2130,0x2210,0x2300,0x2400,0x28e7,0x290d,0x2aff,0x2bf4,0x2cc2,0x2d5f,0x2e33,0x30f8,0x3203,0x332e,0x3430,0x35d4,0x36fe,0x3732,0x3804,0x3922,0x3ade,0x3b22,0x3cde,0x5045,0x5188,0x561f,0x57a8,0x5818,0x5980,0x5a04,0x6055,0x6155,0x626A,0x63A9,0x646A,0x65A9,0x666B,0x67E9,0x686B,0x69E9,0x6a6A,0x6bA9,0x6c6A,0x6dA9,0x6e55,0x6f55,0x7072,0x7182,0x7643,0x7702,0x7824,0x7949,0x7a23,0x7b22,0x7d23,0x8301,0x845f,0x8590,0x8601,0x87f4,0x8805,0x897e,0x8a40,0x8B75,0x8C30,0x8D61,0x8Ea8,0x989d,0x9945,0x9a0d,0x9bde,0x9c17,0x9d70,0x9e01,0x9ff4,0xb018,0xb114,0xb2d8,0xb318,0xb41c,0xb548,0xb632,0xb72b,0xb827,0xb925,0xba4d,0xbb4b,0xbc4a,0xbd49,0xc010,0xc140,0xc240,0xc340,0xc406,0xc880,0xc980,0x0322,0x10fd,0x112e,0x1901,0x2010,0x2180,0x2401,0x257e,0x3080,0x3180,0x3811,0x3934,0x40e4,0x4132,0x4222,0x43f3,0x4443,0x4533,0x4600,0x50b2,0x5181,0x5298,0x8038,0x8120,0x823a,0x8356,0x8420,0x8550,0x8620,0x8741,0x8831,0x8939,0x8a29,0x8b3c,0x8c38,0x8d32,0x8e2c,0x8f5c,0x9059,0x9155,0x924c,0x9340,0x9439,0x9530,0x962c,0x9723,0x9820,0x991f,0x9a1f,0x9b77,0x9c66,0x9d48,0x9e38,0x9f30,0xa070,0xa154,0xa26f,0xa3ff,0xa414,0xa52c,0xa6cf,0xad40,0xae4a,0xaf28,0xb026,0xb100,0xb4ea,0xb809,0xb900,0x0348,0x7005,0x7130,0x7285,0x70a5,0x0348,0x0348,0x0348,0x0348,0x7095,0x1100,0x101c,0x1200,0x1430,0x1604,0x1900,0x1a32,0x1b17,0x1c0c,0x1d0f,0x1e06,0x1f03,0x2000,0x2301,0x241e,0x2500,0x2600,0x2701,0x2800,0x2a06,0x2b40,0x2c04,0x2db0,0x3040,0x3106,0x320c,0x330a,0x3402,0x3503,0x3601,0x3707,0x3802,0x3902,0x5000,0x0320,0x109c,0x0322,0x10e9,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0130,0xff0a
++};
++
++static const u16 sr_vga_regs[]={
++0x0300,0x0131,0x0320,0x1830,0x101c,0x0322,0x1069,0x0300,0x1011,0x2000,0x2102,0x2200,0x230a,0x4200,0x4358,0x0310,0x3f00,0x6063,0x0312,0x200f,0x210f,0x905d,0xd267,0xd502,0xd718,0x0313,0x104a,0x8000,0x0318,0x1007,0x1100,0x1258,0x2005,0x2100,0x2201,0x23e0,0x2400,0x2508,0x2600,0x2702,0x2805,0x2908,0x2a01,0x2be2,0x2c0a,0x2d00,0x2e0a,0x2f00,0x3046,0x1501,0x0348,0x7005,0x7130,0x7285,0x70a5,0x0348,0x0348,0x0348,0x0348,0x7095,0x1100,0x101c,0x1200,0x1430,0x1604,0x1900,0x1a32,0x1b17,0x1c0c,0x1d0f,0x1e06,0x1f03,0x2000,0x2301,0x241e,0x2500,0x2600,0x2701,0x2800,0x2a06,0x2b40,0x2c04,0x2db0,0x3000,0x3105,0x320c,0x330a,0x3402,0x3501,0x3603,0x3707,0x3802,0x3902,0x5000,0x0320,0x109c,0x0322,0x10e9,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0130,0xff32
++};
++
++static const u16 sr_svga_regs[]={
++0x0300,0x0131,0x0320,0x1830,0x101c,0x0322,0x1069,0x0300,0x1011,0x2000,0x2102,0x2200,0x230a,0x2404,0x25b0,0x2606,0x2740,0x4200,0x4358,0x0310,0x3f00,0x6063,0x0312,0x200f,0x210f,0x905d,0xd267,0xd502,0xd718,0x0313,0x104a,0x8000,0x0318,0x1000,0x0348,0x7005,0x7130,0x7285,0x70a5,0x0348,0x0348,0x0348,0x0348,0x7095,0x1100,0x101c,0x1200,0x1430,0x1604,0x1900,0x1a32,0x1b17,0x1c0c,0x1d0f,0x1e06,0x1f03,0x2000,0x2301,0x241e,0x2500,0x2600,0x2701,0x2800,0x2a06,0x2b40,0x2c04,0x2db0,0x3040,0x3106,0x320c,0x330a,0x3402,0x3501,0x3603,0x3707,0x3802,0x3902,0x5000,0x0320,0x109c,0x0322,0x10e9,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0130,0xff32
++};
++
++static const u16 sr_uxga_regs[]={
++0x0300,0x0131,0x0322,0x1069,0x0300,0x1000,0x1190,0x2000,0x210a,0x2200,0x230a,0x0310,0x6061,0x0312,0x200f,0x210f,0x905d,0xd267,0xd502,0xd718,0x0313,0x10cb,0x80fd,0x0318,0x1000,0x0348,0x7005,0x7130,0x7281,0x7085,0x0348,0x0348,0x0348,0x0348,0x7095,0x1100,0x101c,0x1200,0x1430,0x1604,0x1900,0x1a32,0x1b17,0x1c0b,0x1d0e,0x1e08,0x1f05,0x2000,0x2301,0x241e,0x2500,0x2600,0x2701,0x2800,0x2a06,0x2b40,0x2c04,0x2db0,0x3080,0x310c,0x320c,0x330a,0x3403,0x3503,0x3601,0x3707,0x3802,0x3903,0x5000,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0130,0xff03
++};
+diff --git a/drivers/media/i2c/sr200pc20m-t110.c b/drivers/media/i2c/sr200pc20m-t110.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/media/i2c/sr200pc20m-t110.c
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* SM-T110 SR200PC20M V4L2 subdevice. Register tables from Samsung GPL driver. */
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/clk.h>
++#include <linux/gpio/consumer.h>
++#include <linux/delay.h>
++#include <linux/mutex.h>
++#include <media/v4l2-subdev.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-ctrls.h>
++#include "sr200pc20m-t110-regs.h"
++struct sr200 {struct v4l2_subdev sd;struct media_pad pad;struct v4l2_ctrl_handler ctrls;struct mutex lock;struct clk *clk;struct gpio_desc *io,*analog,*standby,*reset;unsigned int width,height;bool powered,initialized;};
++static struct sr200 *to_sr(struct v4l2_subdev *sd){return container_of(sd,struct sr200,sd);}
++static int wr(struct sr200 *s,u16 reg){struct i2c_client *c=v4l2_get_subdevdata(&s->sd);return i2c_smbus_write_byte_data(c,reg>>8,reg&255);}
++static int table(struct sr200 *s,const u16 *regs,size_t n){int ret;for(size_t i=0;i<n;i++){if((regs[i]>>8)==255){if(regs[i]&255)msleep((regs[i]&255)*10);continue;}ret=wr(s,regs[i]);if(ret<0)return ret;}return 0;}
++static void power_off(struct sr200 *s) {
++ if(!s->powered)return;
++ gpiod_set_value_cansleep(s->reset,1);msleep(1);clk_disable_unprepare(s->clk);msleep(5);
++ gpiod_set_value_cansleep(s->standby,0);gpiod_set_value_cansleep(s->analog,0);gpiod_set_value_cansleep(s->io,0);s->powered=s->initialized=false;
++}
++static int power_on(struct sr200 *s) {
++ int ret;
++ if(s->powered)return 0;
++ gpiod_set_value_cansleep(s->io,1);gpiod_set_value_cansleep(s->analog,1);msleep(5);
++ gpiod_set_value_cansleep(s->standby,1);msleep(1);
++ ret=clk_prepare_enable(s->clk);if(ret){gpiod_set_value_cansleep(s->standby,0);gpiod_set_value_cansleep(s->analog,0);gpiod_set_value_cansleep(s->io,0);return ret;}
++ s->powered=true;msleep(40);gpiod_set_value_cansleep(s->reset,1);msleep(2);gpiod_set_value_cansleep(s->reset,0);msleep(5);return 0;
++}
++static int sr_power(struct v4l2_subdev *sd,int on){struct sr200 *s=to_sr(sd);int ret=0;mutex_lock(&s->lock);if(on)ret=power_on(s);else power_off(s);mutex_unlock(&s->lock);return ret;}
++static int sr_reset(struct v4l2_subdev *sd,u32 v){return 0;}
++static int sr_init(struct v4l2_subdev *sd,u32 v){struct sr200 *s=to_sr(sd);int ret;mutex_lock(&s->lock);ret=s->powered?table(s,sr_init_regs,ARRAY_SIZE(sr_init_regs)):-EPIPE;s->initialized=!ret;mutex_unlock(&s->lock);return ret;}
++static const unsigned int widths[]={640,800,1600},heights[]={480,600,1200};
++static void fill(struct v4l2_mbus_framefmt *f,unsigned int w,unsigned int h){*f=(struct v4l2_mbus_framefmt){.width=w,.height=h,.code=MEDIA_BUS_FMT_UYVY8_2X8,.field=V4L2_FIELD_NONE,.colorspace=V4L2_COLORSPACE_JPEG,.ycbcr_enc=V4L2_YCBCR_ENC_601,.quantization=V4L2_QUANTIZATION_FULL_RANGE};}
++static int sr_fmt(struct v4l2_subdev *sd,struct v4l2_subdev_state *state,struct v4l2_subdev_format *f){
++ struct sr200 *s=to_sr(sd);int ret=0;unsigned int mode=f->format.width>=1200?2:f->format.width>=720?1:0;
++ fill(&f->format,widths[mode],heights[mode]);
++ if(f->which==V4L2_SUBDEV_FORMAT_ACTIVE){mutex_lock(&s->lock);s->width=widths[mode];s->height=heights[mode];
++  if(s->powered&&s->initialized){
++   if(mode==2){ret=table(s,sr_uxga_regs,ARRAY_SIZE(sr_uxga_regs));
++    /* Factory still table freezes AWB. Retain auto WB for live full resolution. */
++    if(!ret)ret=wr(s,0x0322);
++    if(!ret)ret=wr(s,0x10e9);
++   }else if(mode==1)ret=table(s,sr_svga_regs,ARRAY_SIZE(sr_svga_regs));
++   else ret=table(s,sr_vga_regs,ARRAY_SIZE(sr_vga_regs));
++  }mutex_unlock(&s->lock);
++ }return ret;
++}
++static int sr_get_fmt(struct v4l2_subdev *sd,struct v4l2_subdev_state *state,struct v4l2_subdev_format *f){struct sr200 *s=to_sr(sd);fill(&f->format,s->width,s->height);return 0;}
++static int sr_code(struct v4l2_subdev *sd,struct v4l2_subdev_state *state,struct v4l2_subdev_mbus_code_enum *e){if(e->index)return -EINVAL;e->code=MEDIA_BUS_FMT_UYVY8_2X8;return 0;}
++static int sr_size(struct v4l2_subdev *sd,struct v4l2_subdev_state *state,struct v4l2_subdev_frame_size_enum *e){if(e->index>=ARRAY_SIZE(widths))return -EINVAL;e->min_width=e->max_width=widths[e->index];e->min_height=e->max_height=heights[e->index];return 0;}
++static int sr_interval(struct v4l2_subdev *sd,struct v4l2_subdev_state *state,struct v4l2_subdev_frame_interval_enum *e){if(e->index)return -EINVAL;e->interval=(struct v4l2_fract){1,15};return 0;}
++static int sr_stream(struct v4l2_subdev *sd,int on){struct sr200 *s=to_sr(sd);int ret;mutex_lock(&s->lock);ret=wr(s,0x0300);if(!ret)ret=wr(s,on?0x0130:0x0131);mutex_unlock(&s->lock);return ret;}
++static int sr_ctrl(struct v4l2_ctrl *ctrl){struct sr200 *s=container_of(ctrl->handler,struct sr200,ctrls);struct i2c_client *c=v4l2_get_subdevdata(&s->sd);int v,ret=0;mutex_lock(&s->lock);if(s->powered&&s->initialized){ret=wr(s,0x0300);if(!ret){v=i2c_smbus_read_byte_data(c,0x11);ret=v<0?v:wr(s,0x1100|((v&~2)|(ctrl->val?2:0)));}}mutex_unlock(&s->lock);return ret;}
++static const struct v4l2_ctrl_ops ctrl_ops={.s_ctrl=sr_ctrl};
++static const struct v4l2_subdev_core_ops core_ops={.s_power=sr_power,.reset=sr_reset,.init=sr_init};
++static const struct v4l2_subdev_video_ops video_ops={.s_stream=sr_stream};
++static const struct v4l2_subdev_pad_ops pad_ops={.get_fmt=sr_get_fmt,.set_fmt=sr_fmt,.enum_mbus_code=sr_code,.enum_frame_size=sr_size,.enum_frame_interval=sr_interval};
++static const struct v4l2_subdev_ops ops={.core=&core_ops,.video=&video_ops,.pad=&pad_ops};
++static int sr_probe(struct i2c_client *c){
++ struct sr200 *s;int ret,id;
++ s=devm_kzalloc(&c->dev,sizeof(*s),GFP_KERNEL);if(!s)return -ENOMEM;
++ mutex_init(&s->lock);s->width=640;s->height=480;v4l2_i2c_subdev_init(&s->sd,c,&ops);
++ s->clk=devm_clk_get(&c->dev,NULL);if(IS_ERR(s->clk))return dev_err_probe(&c->dev,PTR_ERR(s->clk),"MCLK\n");
++ s->io=devm_gpiod_get(&c->dev,"io-enable",GPIOD_OUT_LOW);if(IS_ERR(s->io))return PTR_ERR(s->io);
++ s->analog=devm_gpiod_get(&c->dev,"analog-enable",GPIOD_OUT_LOW);if(IS_ERR(s->analog))return PTR_ERR(s->analog);
++ s->standby=devm_gpiod_get(&c->dev,"standby",GPIOD_OUT_LOW);if(IS_ERR(s->standby))return PTR_ERR(s->standby);
++ s->reset=devm_gpiod_get(&c->dev,"reset",GPIOD_OUT_HIGH);if(IS_ERR(s->reset))return PTR_ERR(s->reset);
++ ret=power_on(s);if(ret)return ret;ret=wr(s,0x0300);id=ret<0?ret:i2c_smbus_read_byte_data(c,0x04);power_off(s);
++ if(id!=0xb4)return dev_err_probe(&c->dev,id<0?id:-ENODEV,"Sensor ID=%02x expectedb4\n",id);
++ v4l2_ctrl_handler_init(&s->ctrls,1);v4l2_ctrl_new_std(&s->ctrls,&ctrl_ops,V4L2_CID_VFLIP,0,1,1,0);s->sd.ctrl_handler=&s->ctrls;
++ if(s->ctrls.error){ret=s->ctrls.error;goto err;}
++ s->pad.flags=MEDIA_PAD_FL_SOURCE;s->sd.entity.function=MEDIA_ENT_F_CAM_SENSOR;
++ ret=media_entity_pads_init(&s->sd.entity,1,&s->pad);if(ret)goto err;
++ ret=v4l2_async_register_subdev(&s->sd);if(ret){media_entity_cleanup(&s->sd.entity);goto err;}
++ dev_info(&c->dev,"SR200PC20M IDb4 verified; VGA UYVY CSI-2 one lane\n");return 0;
++err:v4l2_ctrl_handler_free(&s->ctrls);return ret;
++}
++static void sr_remove(struct i2c_client *c){struct v4l2_subdev *sd=i2c_get_clientdata(c);v4l2_async_unregister_subdev(sd);power_off(to_sr(sd));media_entity_cleanup(&sd->entity);v4l2_ctrl_handler_free(&to_sr(sd)->ctrls);}
++static const struct of_device_id sr_match[]={{.compatible="siliconfile,sr200pc20m"},{}};
++MODULE_DEVICE_TABLE(of,sr_match);
++static struct i2c_driver sr_driver={.probe=sr_probe,.remove=sr_remove,.driver={.name="sr200pc20m-t110",.of_match_table=sr_match}};
++module_i2c_driver(sr_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SR200PC20M sensor for Samsung SM-T110");
+diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform/marvell/mcam-core.c
+--- a/drivers/media/platform/marvell/mcam-core.c
++++ b/drivers/media/platform/marvell/mcam-core.c
+@@ -104,6 +104,7 @@
+ 	bool planar;
+ 	u32 mbus_code;
+ } mcam_formats[] = {
++ { .pixelformat=V4L2_PIX_FMT_UYVY,.mbus_code=MEDIA_BUS_FMT_UYVY8_2X8,.bpp=2,.planar=false },
+ 	{
+ 		.pixelformat	= V4L2_PIX_FMT_YUYV,
+ 		.mbus_code	= MEDIA_BUS_FMT_YUYV8_2X8,
+@@ -759,6 +760,7 @@
+ 		mcam_reg_write_mask(cam, REG_CTRL0,
+ 			C0_DF_YUV | C0_YUV_420PL | C0_YUVE_VYUY, C0_DF_MASK);
+ 		break;
++	case V4L2_PIX_FMT_UYVY:
+ 	case V4L2_PIX_FMT_YUYV:
+ 		mcam_reg_write_mask(cam, REG_CTRL0,
+ 			C0_DF_YUV | C0_YUV_PACKED | C0_YUVE_NOSWAP, C0_DF_MASK);
+@@ -838,8 +840,9 @@
+ 	 */
+ 	spin_lock_irqsave(&cam->dev_lock, flags);
+ 	clear_bit(CF_SG_RESTART, &cam->flags);
+-	mcam_ctlr_stop(cam);
+-	cam->state = S_IDLE;
++ /* Finish the in-flight CSI frame before clearing ENABLE. */
++ if(!cam->t110_csi || !test_bit(CF_DMA_ACTIVE,&cam->flags))mcam_ctlr_stop(cam);
++ cam->state = S_IDLE;
+ 	spin_unlock_irqrestore(&cam->dev_lock, flags);
+ 	/*
+ 	 * This is a brutally long sleep, but experience shows that
+@@ -848,11 +851,12 @@
+ 	 * sometimes (on mmp) get a frame at the end WITHOUT the
+ 	 * start-of-frame indication.
+ 	 */
+-	msleep(150);
++	msleep(cam->t110_csi ? 500 : 150);
+ 	if (test_bit(CF_DMA_ACTIVE, &cam->flags))
+ 		cam_err(cam, "Timeout waiting for DMA to end\n");
+ 		/* This would be bad news - what now? */
+ 	spin_lock_irqsave(&cam->dev_lock, flags);
++ if(cam->t110_csi)mcam_ctlr_stop(cam);
+ 	mcam_ctlr_irq_disable(cam);
+ 	spin_unlock_irqrestore(&cam->dev_lock, flags);
+ }
+@@ -959,7 +963,9 @@
+ static unsigned long mclk_recalc_rate(struct clk_hw *hw,
+ 				unsigned long parent_rate)
+ {
+-	return 48000000;
++	struct mcam_camera *cam = container_of(hw, struct mcam_camera, mclk_hw);
++ if (cam->bus_type==V4L2_MBUS_CSI2_DPHY && cam->mclk_div==13)return 24000000;
++ return 48000000;
+ }
+ 
+ static const struct clk_ops mclk_ops = {
+@@ -1131,6 +1137,13 @@
+ 		buf = cam->vb_bufs[i];
+ 
+ 		if (buf) {
++            /* Return a shared contiguous underrun buffer only once. */
++            if (cam->t110_csi && cam->buffer_mode == B_DMA_contig) {
++                unsigned int j;
++                for (j = i + 1; j < MAX_DMA_BUFS; j++)
++                    if (cam->vb_bufs[j] == buf)
++                        cam->vb_bufs[j] = NULL;
++            }
+ 			vb2_buffer_done(&buf->vb_buf.vb2_buf, state);
+ 			cam->vb_bufs[i] = NULL;
+ 		}
+@@ -1338,7 +1351,9 @@
+ static int mcam_vidioc_enum_fmt_vid_cap(struct file *filp,
+ 		void *priv, struct v4l2_fmtdesc *fmt)
+ {
+-	if (fmt->index >= N_MCAM_FMTS)
++	struct mcam_camera *cam=video_drvdata(filp);
++ if(cam->t110_csi){if(fmt->index)return -EINVAL;fmt->pixelformat=V4L2_PIX_FMT_UYVY;return 0;}
++ if (fmt->index >= N_MCAM_FMTS)
+ 		return -EINVAL;
+ 	fmt->pixelformat = mcam_formats[fmt->index].pixelformat;
+ 	return 0;
+@@ -1359,6 +1374,7 @@
+ 	};
+ 	int ret;
+ 
++	if(cam->t110_csi)pix->pixelformat=V4L2_PIX_FMT_UYVY;
+ 	f = mcam_find_format(pix->pixelformat);
+ 	pix->pixelformat = f->pixelformat;
+ 	v4l2_fill_mbus_format(&format.format, pix, f->mbus_code);
+@@ -1374,7 +1390,7 @@
+ 		pix->sizeimage = pix->height * pix->bytesperline;
+ 		break;
+ 	}
+-	pix->colorspace = V4L2_COLORSPACE_SRGB;
++	pix->colorspace = cam->t110_csi?V4L2_COLORSPACE_JPEG:V4L2_COLORSPACE_SRGB;
+ 	return ret;
+ }
+ 
+@@ -1709,8 +1725,15 @@
+ int mccic_irq(struct mcam_camera *cam, unsigned int irqs)
+ {
+ 	unsigned int frame, handled = 0;
++ bool frame_started=false;
+ 
+ 	mcam_reg_write(cam, REG_IRQSTAT, FRAMEIRQS); /* Clear'em all */
++ /* Final EOF may arrive without a matching SOF after disabling CCIC. */
++ if(cam->t110_csi && cam->state==S_IDLE && (irqs&(IRQ_EOF0|IRQ_EOF1|IRQ_EOF2))) {
++  mcam_ctlr_stop(cam);
++  clear_bit(CF_DMA_ACTIVE,&cam->flags);
++  handled=IRQ_HANDLED;
++ }
+ 	/*
+ 	 * Handle any frame completions.  There really should
+ 	 * not be more than one of these, or we have fallen
+@@ -1736,13 +1759,14 @@
+ 	 * at once; may want to rethink that.
+ 	 */
+ 	for (frame = 0; frame < cam->nbufs; frame++) {
+-		if (irqs & (IRQ_SOF0 << frame)) {
++		if ((irqs & (IRQ_SOF0 << frame)) && (!cam->t110_csi || cam->state!=S_IDLE)) {
++ frame_started=true;
+ 			set_bit(CF_FRAME_SOF0 + frame, &cam->flags);
+ 			handled = IRQ_HANDLED;
+ 		}
+ 	}
+ 
+-	if (handled == IRQ_HANDLED) {
++	if (handled == IRQ_HANDLED && (!cam->t110_csi || frame_started)) {
+ 		set_bit(CF_DMA_ACTIVE, &cam->flags);
+ 		if (cam->buffer_mode == B_DMA_sg)
+ 			mcam_ctlr_stop(cam);
+@@ -1869,6 +1893,7 @@
+ 	mcam_set_config_needed(cam, 1);
+ 	cam->pix_format = mcam_def_pix_format;
+ 	cam->mbus_code = mcam_def_mbus_code;
++ if(cam->t110_csi){cam->pix_format.pixelformat=V4L2_PIX_FMT_UYVY;cam->mbus_code=MEDIA_BUS_FMT_UYVY8_2X8;}
+ 
+ 	cam->notifier.ops = &mccic_notify_ops;
+ 	ret = v4l2_async_nf_register(&cam->notifier);
+@@ -1976,9 +2001,17 @@
+ 		 */
+ 		if (cam->buffer_mode == B_DMA_sg && cam->vb_bufs[0])
+ 			list_add(&cam->vb_bufs[0]->queue, &cam->buffers);
+-		ret = mcam_read_setup(cam);
+-	}
+-	return ret;
++		/* Restore CCIC-owned contiguous buffers after sleep. */
++  if(cam->t110_csi && cam->buffer_mode==B_DMA_contig) {
++   for(unsigned int i=0;i<2;i++) {
++    struct mcam_vb_buffer *b=cam->vb_bufs[i];
++    if(b && list_empty(&b->queue))list_add_tail(&b->queue,&cam->buffers);
++    cam->vb_bufs[i]=NULL;
++   }
++  }
++  ret = mcam_read_setup(cam);
++ }
++ return ret;
+ }
+ EXPORT_SYMBOL_GPL(mccic_resume);
+ 
+diff --git a/drivers/media/platform/marvell/mcam-core.h b/drivers/media/platform/marvell/mcam-core.h
+--- a/drivers/media/platform/marvell/mcam-core.h
++++ b/drivers/media/platform/marvell/mcam-core.h
+@@ -109,6 +109,7 @@
+ 	spinlock_t dev_lock;
+ 	struct device *dev; /* For messages, dma alloc */
+ 	enum mcam_chip_id chip_id;
++	bool t110_csi;
+ 	enum mcam_buffer_mode buffer_mode;
+ 
+ 	int mclk_src;	/* which clock source the mclk derives from */
+diff --git a/drivers/media/platform/marvell/mmp-driver.c b/drivers/media/platform/marvell/mmp-driver.c
+--- a/drivers/media/platform/marvell/mmp-driver.c
++++ b/drivers/media/platform/marvell/mmp-driver.c
+@@ -195,6 +195,14 @@
+ 	mcam->calc_dphy = mmpcam_calc_dphy;
+ 	mcam->dev = &pdev->dev;
+ 	pdata = pdev->dev.platform_data;
++ if (of_device_is_compatible(pdev->dev.of_node,"samsung,t110-ccic")) {
++  pdata=devm_kzalloc(&pdev->dev,sizeof(*pdata),GFP_KERNEL);
++  if(!pdata)return -ENOMEM;
++  *pdata=(struct mmp_camera_platform_data){.bus_type=V4L2_MBUS_CSI2_DPHY,.mclk_src=3,.mclk_div=13,.dphy={0x0b05,0x11,0x0900},.lane=1};
++  pdev->dev.platform_data=pdata;
++  mcam->calc_dphy=NULL;
++  mcam->t110_csi=true;
++ }
+ 	if (pdata) {
+ 		mcam->mclk_src = pdata->mclk_src;
+ 		mcam->mclk_div = pdata->mclk_div;
+@@ -218,7 +226,7 @@
+ 	}
+ 	mcam->mipi_enabled = false;
+ 	mcam->chip_id = MCAM_ARMADA610;
+-	mcam->buffer_mode = B_DMA_sg;
++	mcam->buffer_mode = of_device_is_compatible(pdev->dev.of_node,"samsung,t110-ccic") ? B_DMA_contig : B_DMA_sg;
+ 	strscpy(mcam->bus_info, "platform:mmp-camera", sizeof(mcam->bus_info));
+ 	spin_lock_init(&mcam->dev_lock);
+ 	/*
+@@ -304,6 +312,7 @@
+ 	struct mmp_camera *cam = platform_get_drvdata(pdev);
+ 	struct mcam_camera *mcam = &cam->mcam;
+ 
++	of_clk_del_provider(pdev->dev.of_node);
+ 	mccic_shutdown(mcam);
+ 	v4l2_device_unregister(&mcam->v4l2_dev);
+ 	pm_runtime_force_suspend(mcam->dev);
+diff --git a/drivers/video/backlight/Kconfig b/drivers/video/backlight/Kconfig
+--- a/drivers/video/backlight/Kconfig
++++ b/drivers/video/backlight/Kconfig
+@@ -532,3 +532,7 @@
+ endif # BACKLIGHT_CLASS_DEVICE
+ 
+ endmenu
++
++config BACKLIGHT_T110_VX5B3D
++	tristate "SM-T110 retained VX5B3D backlight"
++	depends on BACKLIGHT_CLASS_DEVICE && I2C && OF
+diff --git a/drivers/video/backlight/Makefile b/drivers/video/backlight/Makefile
+--- a/drivers/video/backlight/Makefile
++++ b/drivers/video/backlight/Makefile
+@@ -64,3 +64,5 @@
+ obj-$(CONFIG_BACKLIGHT_ARCXCNN) 	+= arcxcnn_bl.o
+ obj-$(CONFIG_BACKLIGHT_RAVE_SP)		+= rave-sp-backlight.o
+ obj-$(CONFIG_BACKLIGHT_LED)		+= led_bl.o
++
++obj-$(CONFIG_BACKLIGHT_T110_VX5B3D) += t110-vx5b3d.o
+diff --git a/drivers/video/backlight/t110-vx5b3d.c b/drivers/video/backlight/t110-vx5b3d.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/video/backlight/t110-vx5b3d.c
+@@ -0,0 +1,520 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 VX5B3D panel supplies, MIPI initialization and backlight control. */
++#include <linux/backlight.h>
++#include <linux/t110-board.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/gpio/consumer.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++
++#define PWM_PERIOD 0x160
++#define PWM_DUTY 0x164
++#define PWM_ENABLE 0x15c
++#define LVDS_ENABLE 0x604
++#define PWM_PIN 0x138
++#define MAX_DUTY 2032
++
++struct t110_bl {
++	struct i2c_client *client;
++	struct mutex lock;
++	u32 period, pin, lvds;
++	u32 duty;
++	bool blank;
++	struct gpio_desc *panel_en,*led_en,*bridge_en,*reset;
++	struct device *pmic_dev;
++	struct regmap *power;
++	void __iomem *dsi;
++	u32 dsi_ctrl,dsi_clock,dsi_lanes,dsi_cmd1;
++	struct regulator *core,*io;
++	bool powered,core_on,io_on;
++	unsigned int power_cycles;
++ unsigned int cold_starts;
++ unsigned int last_off_enable;
++ bool sleep_powercut,resume_programmed;
++ unsigned int suspend_offs,suspend_resumes;
++};
++static bool cold_init=true;
++module_param(cold_init,bool,0444);
++static void release_device(void *data){put_device(data);}
++
++static int vx_read(struct t110_bl *t, u16 reg, u32 *value)
++{
++ u8 addr[]={0x09,0x29,0x05,0x01,0x41,reg&0xff,reg>>8,4,0};
++ u8 request[]={0x09,0x24,0x05,0x01},data[4];
++ struct i2c_msg msgs[]={
++  {.addr=t->client->addr,.len=sizeof(addr),.buf=addr},
++  {.addr=t->client->addr,.len=sizeof(request),.buf=request},
++  {.addr=t->client->addr,.flags=I2C_M_RD,.len=sizeof(data),.buf=data},
++ };
++ int ret=0,i;
++ i2c_lock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ /* Separate transfers preserve the vendor's STOP boundaries. */
++ for(i=0;i<ARRAY_SIZE(msgs);i++){
++  ret=__i2c_transfer(t->client->adapter,&msgs[i],1);
++  if(ret!=1)break;
++ }
++ i2c_unlock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ if(ret!=1){
++  dev_err_ratelimited(&t->client->dev,"CSR read %03x phase %d failed %d\n",reg,i,ret);
++  return ret<0?ret:-EIO;
++ }
++ *value=(u32)data[0]|(u32)data[1]<<8|(u32)data[2]<<16|(u32)data[3]<<24;
++ return 0;
++}
++
++static u8 dsi_ecc(const u8 *data)
++{
++ static const u32 masks[]={0xf12cb7,0xf2555b,0x749a6d,0xb8e38e,0xdf03f0,0xeffc00};
++ u32 bits=data[0]|data[1]<<8|data[2]<<16;u8 ecc=0;
++ for(int i=0;i<6;i++)ecc|=(hweight32(bits&masks[i])&1)<<i;
++ return ecc;
++}
++static int __maybe_unused vx_release(struct t110_bl *t)
++{
++ u8 release=0;int ret=i2c_master_send(t->client,&release,1);
++ return ret==1?0:ret<0?ret:-EIO;
++}
++static int vx_mipi_write(struct t110_bl *t,u16 reg,u32 value)
++{
++ u8 data[]={0x29,9,0,0,5,1,0x40,reg&255,reg>>8,value&255,value>>8,value>>16,value>>24,0,0};
++ u16 crc=0xffff;u32 status;int ret;
++ data[3]=dsi_ecc(data);
++ for(int i=4;i<13;i++)for(int b=0;b<8;b++)crc=((crc^(data[i]>>b))&1)?(crc>>1)^0x8408:crc>>1;
++ data[13]=crc&255;data[14]=crc>>8;
++ for(int i=0;i<sizeof(data);i+=4) {
++  u32 word=0;for(int b=0;b<4&&i+b<sizeof(data);b++)word|=(u32)data[i+b]<<(b*8);
++  writel(word,t->dsi+0x30);writel(BIT(31)|BIT(30)|(i<<16),t->dsi+0x2c);
++  ret=readl_poll_timeout(t->dsi+0x2c,status,!(status&BIT(31)),1,50000);if(ret)return ret;
++
++ }
++ writel(BIT(31)|BIT(27)|sizeof(data),t->dsi+0x20);
++ ret=readl_poll_timeout(t->dsi+0x20,status,!(status&BIT(31)),1,50000);
++ if(ret)dev_err(&t->client->dev,"MIPI write %03x timed out: %08x\n",reg,status);
++ udelay(1);return ret;
++}
++static int vx_write(struct t110_bl *t, u16 reg, u32 value)
++{
++	u8 msg[] = {0x09, 0x29, 0x05, 0x01, 0x40, reg & 0xff, reg >> 8,
++		value & 0xff, value >> 8, value >> 16, value >> 24};
++	int ret;
++	ret = i2c_master_send(t->client, msg, sizeof(msg));
++	return ret == sizeof(msg) ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static int panel_off(struct t110_bl *t);
++static int panel_on(struct t110_bl *t,int target);
++static int t110_bl_update(struct backlight_device *bl)
++{
++	struct t110_bl *t = bl_get_data(bl);
++	u32 target = backlight_get_brightness(bl), check, lvds;
++	int ret;
++
++	mutex_lock(&t->lock);
++	if(!target) {
++		ret=t->powered?panel_off(t):0;
++		if(!ret){t->duty=0;t->blank=true;}
++		goto out;
++	}
++	if(!t->powered) {
++		ret=panel_on(t,target);
++		if(!ret){t->duty=target;t->blank=false;}
++		goto out;
++	}
++	ret = vx_read(t, LVDS_ENABLE, &lvds);
++	if (ret)
++		goto out;
++	if (lvds != t->lvds) {
++		ret = -EIO;
++		goto out;
++	}
++	ret = vx_write(t, PWM_DUTY, target);
++	if (ret)goto out;
++	ret = vx_write(t, PWM_ENABLE, 5);
++	if (ret)goto out;
++	ret = vx_read(t, PWM_DUTY, &check);
++	if (!ret && check != target)
++		ret = -EIO;
++	if (!ret) ret = vx_read(t, PWM_ENABLE, &check);
++	if (!ret && check != (target ? 5 : 0)) ret = -EIO;
++	if (!ret) ret = vx_read(t, LVDS_ENABLE, &check);
++	if (!ret && check != (target ? t->lvds : 0x3fffffff)) ret = -EIO;
++	if (!ret) {
++		t->duty = target;
++		t->blank = !target;
++	}
++out:
++	mutex_unlock(&t->lock);
++	return ret;
++}
++
++static int t110_bl_get(struct backlight_device *bl)
++{
++	struct t110_bl *t = bl_get_data(bl);
++	u32 duty, enable;
++	int ret;
++	mutex_lock(&t->lock);
++	if(!t->powered){mutex_unlock(&t->lock);return 0;}
++	ret = vx_read(t, PWM_DUTY, &duty);
++	if (!ret)
++		ret = vx_read(t, PWM_ENABLE, &enable);
++	mutex_unlock(&t->lock);
++	return ret ? ret : enable == 5 ? duty : 0;
++}
++
++static const struct backlight_ops t110_bl_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status = t110_bl_update,
++	.get_brightness = t110_bl_get,
++};
++struct vx_reg {u16 reg;u32 value;};
++/* Samsung GOYA 48.05MHz sequence, matching every programmable field
++ * captured on this board. PWM/LVDS stay disabled until final restore. */
++static const struct vx_reg init_pll[]={
++ {0x700,0x6c900040},{0x704,0x3040a},{0x70c,0x4604},{0x710,0x054d000b},
++ {0x714,0x20},{0x718,0x102},{0x71c,0xa8002f},{0x720,0},
++ {0x154,0},{0x154,0x80000000}
++};
++static const struct vx_reg init_video[]={
++ {0x37c,0x1063},{0x380,0x82a86030},{0x384,0x2861408b},{0x388,0x130285},
++ {0x38c,0x10630009},{0x394,0x400b82a8},{0x600,0x016cc78c},
++ {0x604,0x3fffffff},{0x608,0xd8c},{0x154,0},{0x154,0x80000000},
++ {0x120,5},{0x124,0x1892c400},{0x128,0x102806},{0x12c,0x62},
++ {0x130,0x3c18},{0x134,0x15},{0x138,0xff8000},{0x13c,0},
++ {0x114,0xc6302},{0x140,0x10000},{0x174,0},{0x404,0x55550822},
++ {0x418,0x555502ff},{0x410,0x05e50300},{0x20c,0x124},{0x21c,0},
++ {0x224,7},{0x228,0x50001},{0x22c,0xff03},{0x230,1},{0x234,0xca033e10},
++ {0x238,0x60},{0x23c,0x82e86030},{0x244,0x1e0285},{0x258,0x60062},
++ {0x400,0},{0x160,2040},{0x164,0},{0x15c,0},{0x158,0},{0x158,1}
++};
++static int vx_table(struct t110_bl *t,const struct vx_reg *regs,int count)
++{
++ for(int i=0;i<count;i++){int ret=vx_mipi_write(t,regs[i].reg,regs[i].value);if(ret)return ret;}
++ return 0;
++}
++static int vx_initialize(struct t110_bl *t)
++{
++ int ret=vx_table(t,init_pll,ARRAY_SIZE(init_pll));if(ret)return ret;
++ usleep_range(1000,2000);
++ ret=vx_mipi_write(t,0x700,0x6c900840);if(ret)return ret;
++ ret=vx_mipi_write(t,0x70c,0x5e56);if(ret)return ret;
++ ret=vx_mipi_write(t,0x718,0x202);if(ret)return ret;
++ ret=vx_mipi_write(t,0x154,0);if(ret)return ret;
++ ret=vx_mipi_write(t,0x154,0x80000000);if(ret)return ret;
++ usleep_range(1000,2000);
++ ret=vx_table(t,init_video,ARRAY_SIZE(init_video));if(ret)return ret;
++ msleep(10);return 0;
++}
++/* Called only while I2C1 is parked/locked and touch is quiescent. All
++ * register programming here uses DSI; regulator accesses use PMIC I2C2. */
++static int bridge_cold_action(void *data)
++{
++ struct t110_bl *t=data;unsigned int enabled;int ret,saved_error=0;
++ gpiod_set_value_cansleep(t->led_en,0);gpiod_set_value_cansleep(t->panel_en,0);
++ gpiod_set_value_cansleep(t->reset,0);udelay(20);
++ gpiod_set_value_cansleep(t->bridge_en,0);
++ if(t->io_on){ret=regulator_disable(t->io);if(ret){saved_error=ret;goto restore_power;}t->io_on=false;}
++ if(t->core_on){ret=regulator_disable(t->core);if(ret){saved_error=ret;goto restore_power;}t->core_on=false;}
++ ret=regmap_read(t->power,0x52,&enabled);if(ret){saved_error=ret;goto restore_power;}
++ t->last_off_enable=enabled;
++ dev_info(&t->client->dev,"T110_BRIDGE: cold rails off enable52=%02x bridge=%d reset=%d\n",
++          enabled,gpiod_get_value_cansleep(t->bridge_en),gpiod_get_value_cansleep(t->reset));
++ if(enabled&0x09){saved_error=-EBUSY;goto restore_power;}
++ msleep(350);
++restore_power:
++ /* Restore supplies and reset/program the bridge even if the off-state
++  * check failed; do not reconnect a deliberately unpowered I2C slave. */
++ if(!t->core_on){ret=regulator_enable(t->core);if(ret)return ret;t->core_on=true;}
++ if(!t->io_on){ret=regulator_enable(t->io);if(ret)return ret;t->io_on=true;}
++ gpiod_set_value_cansleep(t->bridge_en,1);msleep(10);
++ gpiod_set_value_cansleep(t->reset,0);udelay(20);
++ gpiod_set_value_cansleep(t->reset,1);usleep_range(1000,2000);
++ msleep(32);ret=vx_initialize(t);
++ return ret?ret:saved_error;
++}
++static int bridge_touch_transaction(void *data)
++{
++ struct t110_bl *t=data;struct device *dev;int ret;
++ dev=bus_find_device_by_name(&i2c_bus_type,NULL,"1-0020");
++ if(!dev)return -EPROBE_DEFER;
++ ret=zinitix_goya_bridge_bootstrap(to_i2c_client(dev),bridge_cold_action,t);
++ put_device(dev);return ret;
++}
++static int bridge_cold_start(struct t110_bl *t)
++{
++ u32 check;int ret;
++ /* No I2C bridge transaction is required before power/reset. DSI and DRM
++  * are serialized and the I2C provider restores pins on every exit. */
++ ret=t110_display_bootstrap(bridge_touch_transaction,t);
++ if(ret)return ret;
++ ret=vx_read(t,0x704,&check);if(ret)return ret;
++ if(check!=0x3040a)return -EIO;
++ ret=vx_read(t,0x124,&check);if(ret)return ret;
++ if(check!=0x1892c400)return -EIO;
++ ret=vx_read(t,PWM_PERIOD,&check);if(ret)return ret;
++ if(check!=2040)return -EIO;
++ ret=vx_read(t,LVDS_ENABLE,&check);if(ret)return ret;
++ if(check!=0x3fffffff)return -EIO;
++ t->powered=false;t->cold_starts++;
++ dev_info(&t->client->dev,"T110_BRIDGE: cold initialization/readback passed, starts=%u\n",t->cold_starts);
++ return 0;
++}
++static void panel_cut_power(struct t110_bl *t)
++{
++ gpiod_set_value_cansleep(t->led_en,0);gpiod_set_value_cansleep(t->panel_en,0);
++ writel(0,t->dsi);readl(t->dsi);writel(t->dsi_lanes&~0xf0,t->dsi+0x88);writel(0,t->dsi+0x84);
++ gpiod_set_value_cansleep(t->reset,0);udelay(20);
++ gpiod_set_value_cansleep(t->bridge_en,0);
++ if(t->io_on&&!regulator_disable(t->io))t->io_on=false;
++ if(t->core_on&&!regulator_disable(t->core))t->core_on=false;
++ t->powered=false;
++}
++static int panel_off(struct t110_bl *t)
++{
++ int ret;
++ ret=vx_write(t,PWM_DUTY,0);if(ret)return ret;
++ ret=vx_write(t,PWM_ENABLE,0);if(ret)return ret;
++ msleep(100);ret=vx_write(t,LVDS_ENABLE,0x3fffffff);if(ret)return ret;
++ msleep(30);
++ i2c_lock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ /* Touch remains active for tap-to-wake on this shared bus. Vendor full
++  * power-off parks I2C pins and suspends touch; do not remove bridge rails
++  * in this runtime screen-off path. */
++ gpiod_set_value_cansleep(t->led_en,0);gpiod_set_value_cansleep(t->panel_en,0);
++
++ t->powered=false;
++ i2c_unlock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ dev_info(&t->client->dev,"panel off: panel/LED/LVDS off; bridge and DSI retained for DRM/touch\n");
++ return 0;
++}
++static int panel_on(struct t110_bl *t,int target)
++{
++ int ret;u32 check;unsigned int enabled;
++ /* Runtime wake retains bridge state until touch/I2C suspend is coordinated. */
++
++ t->powered=true;
++ ret=vx_read(t,0x704,&check);if(ret||check!=0x3040a){ret=ret?:-EIO;goto cut;}
++ ret=vx_read(t,0x124,&check);if(ret||check!=0x1892c400){ret=ret?:-EIO;goto cut;}
++ gpiod_set_value_cansleep(t->panel_en,1);gpiod_set_value_cansleep(t->led_en,1);msleep(5);
++ ret=vx_write(t,LVDS_ENABLE,t->lvds);if(ret)goto cut;
++ msleep(110);ret=vx_write(t,PWM_PIN,t->pin);if(ret)goto cut;
++ ret=vx_write(t,PWM_DUTY,target);if(ret)goto cut;
++ ret=vx_write(t,PWM_ENABLE,target?5:0);if(ret)goto cut;
++ ret=vx_read(t,PWM_DUTY,&check);if(ret||check!=target){ret=ret?:-EIO;goto cut;}
++ ret=vx_read(t,PWM_ENABLE,&check);if(ret||check!=5){ret=ret?:-EIO;goto cut;}
++ ret=vx_read(t,LVDS_ENABLE,&check);if(ret||check!=t->lvds){ret=ret?:-EIO;goto cut;}
++ ret=regmap_read(t->power,0x52,&enabled);if(ret)goto cut;
++ if((enabled&0x09)!=0x09){ret=-EIO;goto cut;}
++ t->power_cycles++;dev_info(&t->client->dev,"panel on: retained bridge/readback passed, cycle=%u\n",t->power_cycles);
++ return 0;
++cut:
++ i2c_lock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ panel_cut_power(t);i2c_unlock_bus(t->client->adapter,I2C_LOCK_SEGMENT);
++ dev_err(&t->client->dev,"panel power-on failed: %d\n",ret);return ret;
++}
++static int bridge_pm_cut(void *data)
++{
++ struct t110_bl *t=data;unsigned int enabled;int ret;
++ gpiod_set_value_cansleep(t->led_en,0);gpiod_set_value_cansleep(t->panel_en,0);
++ gpiod_set_value_cansleep(t->reset,0);udelay(20);
++ gpiod_set_value_cansleep(t->bridge_en,0);
++ if(t->io_on){ret=regulator_disable(t->io);if(ret)return ret;t->io_on=false;}
++ if(t->core_on){ret=regulator_disable(t->core);if(ret)return ret;t->core_on=false;}
++ ret=regmap_read(t->power,0x52,&enabled);if(ret)return ret;
++ t->last_off_enable=enabled;
++ if(enabled&0x09)return -EBUSY;
++ t->powered=false;t->resume_programmed=false;t->suspend_offs++;
++ msleep(350);
++ dev_info(&t->client->dev,"T110_BRIDGE_PM: rails off for suspend enable52=%02x bridge=%d reset=%d count=%u\n",
++          enabled,gpiod_get_value_cansleep(t->bridge_en),gpiod_get_value_cansleep(t->reset),t->suspend_offs);
++ return 0;
++}
++static int bridge_pm_program(void *data)
++{
++ struct t110_bl *t=data;int ret;
++ if(!t->core_on){ret=regulator_enable(t->core);if(ret)return ret;t->core_on=true;}
++ if(!t->io_on){ret=regulator_enable(t->io);if(ret)return ret;t->io_on=true;}
++ gpiod_set_value_cansleep(t->bridge_en,1);msleep(10);
++ gpiod_set_value_cansleep(t->reset,0);udelay(20);
++ gpiod_set_value_cansleep(t->reset,1);usleep_range(1000,2000);
++ msleep(32);ret=vx_initialize(t);
++ if(!ret){t->powered=false;t->resume_programmed=true;}
++ return ret;
++}
++static int bridge_pm_bootstrap(void *data)
++{return t110_display_resume_bridge(bridge_pm_program,data);}
++static int bridge_suspend_late(struct device *dev)
++{
++ struct backlight_device *bl=dev_get_drvdata(dev);struct t110_bl *t=bl_get_data(bl);int ret;
++ if(!cold_init)return 0;
++ mutex_lock(&t->lock);
++ if(t->powered){ret=-EBUSY;goto out;}
++ ret=i2c_pxa_goya_bridge_suspend(t->client->adapter,bridge_pm_cut,
++                               bridge_pm_bootstrap,t,THIS_MODULE);
++ if(!ret)t->sleep_powercut=true;
++out:
++ mutex_unlock(&t->lock);return ret;
++}
++static int bridge_resume_early(struct device *dev)
++{
++ struct backlight_device *bl=dev_get_drvdata(dev);struct t110_bl *t=bl_get_data(bl);u32 check;int ret=0;
++ mutex_lock(&t->lock);
++ if(!t->sleep_powercut)goto out;
++ if(!t->resume_programmed){ret=-EIO;goto out;}
++ ret=vx_read(t,0x704,&check);if(ret)goto out;
++ if(check!=0x3040a){ret=-EIO;goto out;}
++ ret=vx_read(t,0x124,&check);if(ret)goto out;
++ if(check!=0x1892c400){ret=-EIO;goto out;}
++ ret=vx_read(t,PWM_PERIOD,&check);if(ret)goto out;
++ if(check!=2040){ret=-EIO;goto out;}
++ ret=vx_read(t,LVDS_ENABLE,&check);if(ret)goto out;
++ if(check!=0x3fffffff){ret=-EIO;goto out;}
++ t->sleep_powercut=false;t->resume_programmed=false;
++ t->cold_starts++;t->suspend_resumes++;
++ dev_info(dev,"T110_BRIDGE_PM: resume register check passed count=%u\n",t->suspend_resumes);
++out:
++ mutex_unlock(&t->lock);return ret;
++}
++static const struct dev_pm_ops bridge_pm_ops={
++ .suspend_late=bridge_suspend_late,.resume_early=bridge_resume_early,
++};
++static ssize_t state_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ struct backlight_device *bl=dev_get_drvdata(dev);
++ struct t110_bl *t=bl_get_data(bl);int n=0,ret;u32 value;unsigned int en,v9,v12;
++ static const u16 regs[]={0x700,0x704,0x70c,0x710,0x714,0x718,0x71c,0x720,0x37c,0x380,0x384,0x388,0x38c,0x394,0x600,0x604,0x608,0x120,0x124,0x128,0x12c,0x130,0x134,0x138,0x13c,0x114,0x140,0x174,0x404,0x418,0x410,0x20c,0x21c,0x224,0x228,0x22c,0x230,0x234,0x238,0x23c,0x244,0x258,0x400,0x158,0x154,0x160,0x164,0x15c};
++ mutex_lock(&t->lock);
++ ret=regmap_read(t->power,0x52,&en);if(ret)goto out;
++ ret=regmap_read(t->power,0x12,&v9);if(ret)goto out;
++ ret=regmap_read(t->power,0x15,&v12);if(ret)goto out;
++ n+=sysfs_emit_at(buf,n,"GPIO panel9=%d led12=%d bridge19=%d reset20=%d\nPM822 enable52=%02x selector9=%02x selector12=%02x\n",
++  gpiod_get_value_cansleep(t->panel_en),gpiod_get_value_cansleep(t->led_en),gpiod_get_value_cansleep(t->bridge_en),gpiod_get_value_cansleep(t->reset),
++  en,v9,v12);
++ n+=sysfs_emit_at(buf,n,"sleep_powercut=%d suspend_offs=%u suspend_resumes=%u\n",t->sleep_powercut,t->suspend_offs,t->suspend_resumes);
++ n+=sysfs_emit_at(buf,n,"cold_init=%d cold_starts=%u off_enable52=%02x\n",cold_init,t->cold_starts,t->last_off_enable);
++ n+=sysfs_emit_at(buf,n,"powered=%d core_owned=%d io_owned=%d power_cycles=%u\n",t->powered,t->core_on,t->io_on,t->power_cycles);
++ n+=sysfs_emit_at(buf,n,"DSI ctrl0=%08x ctrl1=%08x phy1=%08x phy2=%08x cmd1=%08x cmd0=%08x\n",readl(t->dsi),readl(t->dsi+4),readl(t->dsi+0x84),readl(t->dsi+0x88),readl(t->dsi+0x24),readl(t->dsi+0x20));
++ n+=sysfs_emit_at(buf,n,"DSI timing=%08x,%08x,%08x,%08x phy3=%08x mem=%08x irq=%08x\n",readl(t->dsi+0xc0),readl(t->dsi+0xc4),readl(t->dsi+0xc8),readl(t->dsi+0xcc),readl(t->dsi+0x8c),readl(t->dsi+0xe0),readl(t->dsi+0x10));
++ if(!t->powered){ret=0;goto out;}
++ for(int i=0;i<ARRAY_SIZE(regs);i++) {
++  ret=vx_read(t,regs[i],&value);if(ret)goto out;
++  n+=sysfs_emit_at(buf,n,"VX %03x=%08x\n",regs[i],value);
++ }
++out:
++ mutex_unlock(&t->lock);return ret?ret:n;
++}
++static DEVICE_ATTR_RO(state);
++static struct attribute *panel_attrs[]={&dev_attr_state.attr,NULL};
++static const struct attribute_group panel_group={.attrs=panel_attrs};
++static void panel_cleanup(void *data)
++{
++ struct t110_bl *t=data;mutex_lock(&t->lock);
++ if(t->powered)panel_off(t);
++ if(t->core_on||t->io_on)panel_cut_power(t);
++ mutex_unlock(&t->lock);
++}
++
++static int t110_bl_probe(struct i2c_client *client)
++{
++	struct backlight_properties props = {.type = BACKLIGHT_RAW,
++		.max_brightness = MAX_DUTY, .scale = BACKLIGHT_SCALE_LINEAR};
++	struct t110_bl *t;
++	struct backlight_device *bl;
++	u32 enable, mode;
++	int ret;
++
++	if (!of_machine_is_compatible("samsung,goyawifi") ||
++	    client->adapter->nr != 1 || client->addr != 0x64)
++		return -ENODEV;
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
++		return -EOPNOTSUPP;
++	t = devm_kzalloc(&client->dev, sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	t->client = client;
++	mutex_init(&t->lock);
++	t->panel_en=devm_gpiod_get(&client->dev,"panel-enable",GPIOD_ASIS);if(IS_ERR(t->panel_en))return PTR_ERR(t->panel_en);
++	t->led_en=devm_gpiod_get(&client->dev,"led-enable",GPIOD_ASIS);if(IS_ERR(t->led_en))return PTR_ERR(t->led_en);
++	t->bridge_en=devm_gpiod_get(&client->dev,"bridge-enable",GPIOD_ASIS);if(IS_ERR(t->bridge_en))return PTR_ERR(t->bridge_en);
++	t->reset=devm_gpiod_get(&client->dev,"bridge-reset",GPIOD_ASIS);if(IS_ERR(t->reset))return PTR_ERR(t->reset);
++	t->pmic_dev=bus_find_device_by_name(&i2c_bus_type,NULL,"2-0031");if(!t->pmic_dev)return -EPROBE_DEFER;
++	ret=devm_add_action_or_reset(&client->dev,release_device,t->pmic_dev);if(ret)return ret;
++	t->power=dev_get_regmap(t->pmic_dev,NULL);if(!t->power)return -EPROBE_DEFER;
++	t->core=devm_regulator_get(&client->dev,"bridge-core");if(IS_ERR(t->core))return dev_err_probe(&client->dev,PTR_ERR(t->core),"bridge core supply\n");
++	t->io=devm_regulator_get(&client->dev,"bridge-io");if(IS_ERR(t->io))return dev_err_probe(&client->dev,PTR_ERR(t->io),"bridge IO supply\n");
++	t->dsi=devm_ioremap(&client->dev,0xd420b800,0x200);if(!t->dsi)return -ENOMEM;
++ if(cold_init) {
++  /* Own all bridge supplies before cycling them; never set rail voltages. */
++  ret=gpiod_direction_output(t->panel_en,0);if(ret)return ret;
++  ret=gpiod_direction_output(t->led_en,0);if(ret)return ret;
++  ret=gpiod_direction_output(t->bridge_en,1);if(ret)return ret;
++  ret=gpiod_direction_output(t->reset,1);if(ret)return ret;
++  ret=regulator_enable(t->core);if(ret)return ret;t->core_on=true;
++  ret=regulator_enable(t->io);if(ret)return ret;t->io_on=true;
++  t->period=2040;t->pin=0x3fff0030;t->lvds=0x3fffffe0;
++  t->duty=MAX_DUTY/2;props.brightness=t->duty;props.power=BACKLIGHT_POWER_ON;
++  ret=bridge_cold_start(t);if(ret)return dev_err_probe(&client->dev,ret,"cold bridge initialization\n");
++  ret=panel_on(t,t->duty);if(ret)return ret;
++ }else {
++	t->dsi_ctrl=readl(t->dsi);t->dsi_clock=readl(t->dsi+0x84);t->dsi_lanes=readl(t->dsi+0x88);
++	t->dsi_cmd1=readl(t->dsi+0x24);
++	if(t->dsi_ctrl!=0x101||t->dsi_clock!=1||t->dsi_lanes!=0xf0)return -EINVAL;
++	if(gpiod_get_value_cansleep(t->panel_en)!=1||gpiod_get_value_cansleep(t->led_en)!=1||gpiod_get_value_cansleep(t->bridge_en)!=1||gpiod_get_value_cansleep(t->reset)!=1)return -EINVAL;
++	ret=gpiod_direction_output(t->panel_en,1);if(ret)return ret;
++	ret=gpiod_direction_output(t->led_en,1);if(ret)return ret;
++	ret=gpiod_direction_output(t->bridge_en,1);if(ret)return ret;
++	ret=gpiod_direction_output(t->reset,1);if(ret)return ret;
++	ret = vx_read(t, PWM_PERIOD, &t->period);
++	if (!ret) ret = vx_read(t, PWM_DUTY, &t->duty);
++	if (!ret) ret = vx_read(t, PWM_ENABLE, &enable);
++	if (!ret) ret = vx_read(t, LVDS_ENABLE, &t->lvds);
++	if (!ret) ret = vx_read(t, PWM_PIN, &t->pin);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "bridge register read failed\n");
++	dev_info(&client->dev, "T110_DISPLAY_T: period=%08x duty=%08x enable=%08x lvds=%08x pin=%08x\n",
++		t->period, t->duty, enable, t->lvds, t->pin);
++	/* Initial handoff is restricted to the verified board mode. Resume uses the full vendor initialization. */
++	if (t->period != 2040 || t->duty > MAX_DUTY || enable != 5 ||
++	    t->lvds != 0x3fffffe0 || (t->pin != 0x3fff0000 && t->pin != 0x3fff0030))
++		return dev_err_probe(&client->dev, -EINVAL, "unexpected boot bridge state\n");
++	ret=vx_read(t,0x704,&mode);if(ret)return ret;
++ if(mode!=0x3040a)return -EINVAL;
++ ret=vx_read(t,0x124,&mode);if(ret)return ret;
++ if(mode!=0x1892c400)return -EINVAL;
++ props.brightness = t->duty;
++	props.power = BACKLIGHT_POWER_ON;
++	ret=regulator_enable(t->core);if(ret)return ret;t->core_on=true;
++	ret=regulator_enable(t->io);if(ret){regulator_disable(t->core);t->core_on=false;return ret;}t->io_on=true;
++	t->powered=true;
++ }
++	ret=devm_add_action_or_reset(&client->dev,panel_cleanup,t);if(ret)return ret;
++	bl = devm_backlight_device_register(&client->dev, "t110-backlight",
++		&client->dev, t, &t110_bl_ops, &props);
++	if (IS_ERR(bl))
++		return PTR_ERR(bl);
++	i2c_set_clientdata(client, bl);
++	ret=devm_device_add_group(&client->dev,&panel_group);if(ret)return ret;
++	return 0;
++}
++
++static const struct of_device_id t110_bl_match[] = {
++	{.compatible = "samsung,t110-vx5b3d-backlight"}, {}
++};
++MODULE_DEVICE_TABLE(of, t110_bl_match);
++static const struct i2c_device_id t110_bl_ids[] = {
++	{"t110-vx5b3d", 0}, {}
++};
++MODULE_DEVICE_TABLE(i2c, t110_bl_ids);
++static struct i2c_driver t110_bl_driver = {
++	.driver = {.name = "t110-vx5b3d", .of_match_table = t110_bl_match, .pm = pm_sleep_ptr(&bridge_pm_ops)},
++	.probe = t110_bl_probe,
++	.id_table = t110_bl_ids,
++};
++module_i2c_driver(t110_bl_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SM-T110 VX5B3D panel power and MIPI initialization");
+diff --git a/sound/arm/Kconfig b/sound/arm/Kconfig
+--- a/sound/arm/Kconfig
++++ b/sound/arm/Kconfig
+@@ -19,3 +19,11 @@
+ 	select SND_AC97_CODEC
+ 
+ endif	# SND_ARM
++
++config SND_T110_AUDIO
++	tristate "Experimental SM-T110 PM805 playback"
++	depends on ARCH_MMP && I2C && SND && DMA_ENGINE && T110_CPUFREQ
++	select SND_PCM
++	select SND_DMAENGINE_PCM
++	select REGMAP_I2C
++	select SND_JACK
+diff --git a/sound/arm/Makefile b/sound/arm/Makefile
+--- a/sound/arm/Makefile
++++ b/sound/arm/Makefile
+@@ -5,3 +5,5 @@
+ 
+ obj-$(CONFIG_SND_ARMAACI)	+= snd-aaci.o
+ snd-aaci-y			:= aaci.o
++
++obj-$(CONFIG_SND_T110_AUDIO) += t110-audio.o
+diff --git a/sound/arm/t110-audio.c b/sound/arm/t110-audio.c
+new file mode 100644
+--- /dev/null
++++ b/sound/arm/t110-audio.c
+@@ -0,0 +1,588 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SM-T110 duplex audio: SSP1/SQU, PM805, PM822 class D and microphone bias.
++ * Register sequencing derives from the owner's stock audio configuration
++ * and Samsung/Marvell's goyawifi kernel. External rail selectors are retained.
++ */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/i2c.h>
++#include <linux/regmap.h>
++#include <linux/dmaengine.h>
++#include <linux/genalloc.h>
++#include <linux/delay.h>
++#include <linux/workqueue.h>
++#include <linux/spinlock.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/control.h>
++#include <sound/tlv.h>
++#include <sound/dmaengine_pcm.h>
++#include <sound/jack.h>
++
++#define SSCR0 0
++#define SSCR1 4
++#define SSSR 8
++#define SSPSP 0x2c
++#define SSE BIT(7)
++#define BUFFER 16384
++extern int t110_audio_clock_source(void);
++struct t110_stream {
++	struct dma_chan *chan;
++	struct gen_pool *pool;
++	void *buffer;
++	dma_addr_t buffer_addr;
++	bool opened,prepared;
++};
++struct t110_audio {
++	struct device *dev,*codec_dev,*pmic_dev;
++	struct regmap *codec,*pmic,*power;
++	struct i2c_client *client;
++	struct snd_card *card;
++	struct t110_stream stream[2];
++	struct gen_pool *pool;
++	void __iomem *ssp,*apbc,*isccr,*squ_gate,*fccr,*pins,*dma_debug;
++	struct mutex lock;
++	spinlock_t reg_lock;
++	unsigned int running_mask;
++	struct work_struct amp_work;
++	struct delayed_work jack_work;
++	struct snd_jack *jack;
++	bool powered,switch_on,headphones,stopping,hp_on,bias_on;
++	unsigned int volume,hp_volume,mic_source,mic_gain;
++};
++static int mic_bias(struct t110_audio *a,bool preparing)
++{
++	/* Vendor jack detection keeps bias on for an attached headset.
++	 * Here the explicit Headset Mic selection identifies that accessory. */
++	bool on=!a->stopping&&a->mic_source==2&&
++		(a->headphones||preparing||a->stream[1].prepared);
++	int ret=regmap_update_bits(a->power,0x52,BIT(5),on?BIT(5):0);
++	if(!ret)a->bias_on=on;
++	return ret;
++}
++static void clock_idle(struct t110_audio *a)
++{
++	unsigned long flags;
++	spin_lock_irqsave(&a->reg_lock,flags);
++	if(!a->running_mask&&!READ_ONCE(a->stream[1].prepared))
++		writel(readl(a->ssp+SSCR0)&~SSE,a->ssp+SSCR0);
++	spin_unlock_irqrestore(&a->reg_lock,flags);
++}
++static int hp_gain(struct t110_audio *a,unsigned int value)
++{
++	int ret=regmap_write(a->codec,0x56,value);
++	return ret?:regmap_write(a->codec,0x57,value);
++}
++static int hp_sequence(struct t110_audio *a,bool enable)
++{
++	unsigned int status;int ret;
++	if(a->hp_on==enable)return 0;
++	/* Minimum documented gain (-91dB), then allow the existing ramp to settle. */
++	ret=hp_gain(a,1);if(ret)return ret;
++	msleep(20);
++	ret=regmap_update_bits(a->codec,0x26,0xff,enable?0x1d:0);if(ret)return ret;
++	a->hp_on=enable;
++	/* Allow the stock route's 100ms headphone settling time while attenuated. */
++	if(enable)msleep(100);
++	for(int i=0;i<20;i++){
++		ret=regmap_read(a->codec,0x0b,&status);if(ret)return ret;
++		if((status&(enable?0x50:0xa0))==(enable?0x50:0xa0))return 0;
++		msleep(10);
++	}
++	dev_err(a->dev,"headphone sequence %s timeout, status=%02x\n",enable?"up":"down",status);
++	return -ETIMEDOUT;
++}
++static int amp(struct t110_audio *a)
++{
++	bool prepared=a->stream[SNDRV_PCM_STREAM_PLAYBACK].prepared;
++	bool active=prepared && (READ_ONCE(a->running_mask)&BIT(0)) && a->switch_on;
++	int ret;
++	if(!active||a->headphones){
++		ret=regmap_write(a->codec,0x58,1);if(ret)return ret;
++	}
++	ret=regmap_update_bits(a->pmic,0x48,2,(active&&!a->headphones)?2:0);
++	if(ret)return ret;
++	ret=hp_sequence(a,prepared&&a->headphones&&a->switch_on);if(ret)return ret;
++	if(a->hp_on)return hp_gain(a,active?a->hp_volume+92:1);
++	if(active&&!a->headphones)return regmap_write(a->codec,0x58,a->volume+92);
++	return 0;
++}
++static void jack_poll(struct work_struct *w)
++{
++	struct t110_audio *a=container_of(to_delayed_work(w),struct t110_audio,jack_work);
++	unsigned int value;bool changed=false;int ret;
++	mutex_lock(&a->lock);
++	ret=regmap_read(a->pmic,0x39,&value);
++	if(!ret && a->headphones!=!!(value&BIT(7))){
++		a->headphones=!!(value&BIT(7));changed=true;
++		ret=mic_bias(a,false);
++		if(a->stream[SNDRV_PCM_STREAM_PLAYBACK].prepared)ret=amp(a);
++	}
++	mutex_unlock(&a->lock);
++	if(changed)snd_jack_report(a->jack,a->headphones?SND_JACK_HEADPHONE:0);
++	if(ret)dev_err_ratelimited(a->dev,"jack poll/route failed: %d\n",ret);
++	if(!READ_ONCE(a->stopping))schedule_delayed_work(&a->jack_work,msecs_to_jiffies(250));
++}
++static void amp_work(struct work_struct *w)
++{
++	struct t110_audio *a=container_of(w,struct t110_audio,amp_work);
++	int ret;
++	mutex_lock(&a->lock);ret=amp(a);mutex_unlock(&a->lock);
++	if(ret)dev_err(a->dev,"speaker switch failed: %d\n",ret);
++}
++static int off(struct t110_audio *a)
++{
++	unsigned long flags;int ret;
++	WRITE_ONCE(a->stream[0].prepared,false);WRITE_ONCE(a->stream[1].prepared,false);
++	hp_sequence(a,false);
++	a->powered=false;
++	ret=regmap_update_bits(a->pmic,0x48,2,0);
++	regmap_update_bits(a->codec,0x26,0xff,0);
++	regmap_update_bits(a->codec,0x90,0x7f,0);
++	regmap_update_bits(a->codec,0x16,0x7f,0);
++	regmap_update_bits(a->codec,0x94,7,2);
++	mic_bias(a,false);
++	regmap_update_bits(a->codec,0x20,0xc7,0);
++	regmap_update_bits(a->codec,0x21,0x7f,0);
++	regmap_update_bits(a->codec,0x51,0x15,0);
++	regmap_update_bits(a->codec,0x50,0x1f,0);
++	regmap_update_bits(a->codec,0x30,1,0);
++	regmap_update_bits(a->codec,1,1,0);
++	spin_lock_irqsave(&a->reg_lock,flags);
++	WRITE_ONCE(a->running_mask,0);
++	writel(0x00801dc0,a->ssp+SSCR1);
++	writel(readl(a->ssp+SSCR0)&~SSE,a->ssp+SSCR0);
++	writel(readl(a->isccr)&~(BIT(31)|BIT(29)),a->isccr);
++	spin_unlock_irqrestore(&a->reg_lock,flags);
++	return ret;
++}
++static int coef(struct t110_audio *a,const u8 *data,size_t len)
++{
++	/* The codec's coefficient-memory port consumes a byte stream. */
++	return regmap_raw_write(a->codec,0x5c,data,len);
++}
++/* Only these digital blocks are shared by the two codec routes. */
++static int sync_blocks(struct t110_audio *a)
++{
++	bool p=a->stream[SNDRV_PCM_STREAM_PLAYBACK].prepared;
++	bool c=a->stream[SNDRV_PCM_STREAM_CAPTURE].prepared;
++	unsigned int digital=(p||c)?0x0c:0;
++	unsigned int sai=(p||c)?1:0;int ret;
++	if(p){digital|=1;sai|=4;}
++	if(c){digital|=2;sai|=0x10;}
++	ret=regmap_update_bits(a->codec,0x50,0x1f,digital);if(ret)return ret;
++	return regmap_update_bits(a->codec,0x51,0x15,sai);
++}
++static void drop_route(struct t110_audio *a,int direction)
++{
++	WRITE_ONCE(a->stream[direction].prepared,false);
++	if(direction==SNDRV_PCM_STREAM_PLAYBACK){
++		amp(a);
++		regmap_update_bits(a->codec,0x20,0xc7,0);
++		regmap_update_bits(a->codec,0x21,0x7f,0);
++	}else{
++		regmap_update_bits(a->codec,0x16,0x7f,0);
++		regmap_update_bits(a->codec,0x94,7,2);
++		mic_bias(a,false);
++	}
++	if(!a->stream[0].prepared&&!a->stream[1].prepared)off(a);
++	else if(sync_blocks(a))dev_err(a->dev,"failed to retain active codec blocks\n");
++	clock_idle(a);
++}
++static int pm822_audio_clocks(struct regmap *pmic)
++{
++ int ret=regmap_update_bits(pmic,0x50,BIT(1),0);if(ret)return ret;
++ ret=regmap_update_bits(pmic,0x55,BIT(1),0);if(ret)return ret;
++ msleep(20);
++ ret=regmap_update_bits(pmic,0x21,0x30,0x30);if(ret)return ret;
++ msleep(2);return 0;
++}
++static int prepare(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	static const u8 c1[]={4,0x80,0},c2[]={13,0x80,0};
++	static const u8 c3[]={16,0x80,0,0x80,0,0,0,0,0,0x40,0,0x40,0,0x40,0,0x40,0,0,0,0,0,0x80,0,0x80,0,0x80,0,0x80,0,0x80,0,0x80,0};
++	int d=s->stream,ret;unsigned int ready=0;
++	flush_work(&a->amp_work);mutex_lock(&a->lock);
++	/* Reprepare only this direction; leave the peer's clock and route alone. */
++	if(a->stream[d].prepared)drop_route(a,d);
++#define U(map,r,m,v) do{ret=regmap_update_bits(map,r,m,v);if(ret){dev_err(a->dev,"setup register %02x mask %02x value %02x failed %d\n",(unsigned int)(r),(unsigned int)(m),(unsigned int)(v),ret);goto fail;}}while(0)
++	if(!a->powered){
++	/* Goya's vendor PM822 setup locks both oscillators to 32kHz.
++	 * Match that documented clock configuration before codec power-up.
++	 * Only the documented oscillator-mode bits are changed, not rail levels.
++	 */
++	ret=pm822_audio_clocks(a->pmic);if(ret)goto fail;
++	/* board-goya.c enables internal PMIC DVC and the low-jitter 32k
++	 * clock in LOW_POWER2. Preserve other bits and rail selectors. */
++	/* Enable the vendor SSP1 APB/functional clock, release reset. */
++	writel(7,a->apbc);udelay(10);writel(3,a->apbc);udelay(10);
++	ret=t110_audio_clock_source();if(ret)goto fail;
++	writel(0xea948be2,a->isccr);
++	/* GPIO21..24: AF1. Preserve other pin state; only I2S pins are touched. */
++	for(int i=0;i<4;i++)writel((readl(a->pins+i*4)&~7U)|1,a->pins+i*4);
++	writel(0x41d0003f,a->ssp+SSCR0);
++	writel(0x00801dc0,a->ssp+SSCR1); /* continuous clock, DMA directions selected at trigger */
++	writel(0x02100004,a->ssp+SSPSP);
++	writel(3,a->ssp+0x30);writel(3,a->ssp+0x34);
++	writel(readl(a->ssp+SSSR),a->ssp+SSSR);
++	U(a->codec,1,1,1);
++	msleep(2);
++	/* Vendor ACM restores the digital enable register during power-up,
++	 * before configuring individual routes. */
++	U(a->codec,0x50,0x1d,0x0d);
++	for(int i=0;i<100;i++){
++		ret=regmap_read(a->codec,0x0b,&ready);if(ret)goto fail;
++		if(ready&1)break;
++		msleep(10);
++	}
++	if(!(ready&1)){
++		unsigned int power=0,digital=0;
++		regmap_read(a->codec,1,&power);regmap_read(a->codec,0x50,&digital);
++		dev_err(a->dev,"codec not ready: power=%02x digital=%02x sequence=%02x\n",power,digital,ready);
++		ret=-ETIMEDOUT;goto fail;
++	}
++	U(a->codec,0x30,0x3f,0x0e); /* codec slave, I2S, 16-bit */
++	U(a->codec,0x31,0xff,0x49); /* 44.1kHz, vendor bitclock ratio */
++	U(a->codec,0x32,0x2f,4);
++	/* Keep the reference group stable for the whole shared power session. */
++	U(a->codec,0x90,0x7f,0x7e);
++	a->powered=true;
++	}
++	if(d==SNDRV_PCM_STREAM_CAPTURE){
++		/* Vendor Mic1, Mic2 or external headset ADC route. */
++		if(a->mic_source==2){
++			/* LDO14 is exclusively v_micbias; retain its voltage selector. */
++			ret=mic_bias(a,true);if(ret)goto fail;msleep(100);
++		}
++		U(a->codec,0x11,0x0f,a->mic_source==2?1:0);
++		U(a->codec,0x16,0x7f,a->mic_source==1?0x10:(a->mic_source==2?9:1));
++		U(a->codec,0x10,0x1f,0x14);
++		U(a->codec,0x92,0xff,0x56);U(a->codec,0x94,0x0f,a->mic_source==2?1:3);
++		/* PGA register codes descend as gain increases; default about 18dB. */
++		U(a->codec,a->mic_source==1?0x13:0x12,0x1f,31-a->mic_gain);
++		U(a->codec,0x3c,0xff,a->mic_source==1?0x11:0);
++		WRITE_ONCE(a->stream[d].prepared,true);
++		ret=sync_blocks(a);if(ret)goto fail;
++		/* Clock the ADC/SRC while its initial samples are still discarded.
++		 * Waiting without frame clocks left the startup DC step in the WAV. */
++		{unsigned long flags;spin_lock_irqsave(&a->reg_lock,flags);
++		writel(readl(a->ssp+SSCR0)|SSE,a->ssp+SSCR0);
++		spin_unlock_irqrestore(&a->reg_lock,flags);}
++		mutex_unlock(&a->lock);
++		/* The input settles independently; do not delay peer mute/close work. */
++		msleep(500);return 0;
++	}
++	/* Prepare both output chains; jack polling selects the active amplifier. */
++	U(a->codec,0x52,0xff,0xee);
++	ret=hp_gain(a,1);if(ret)goto fail;
++	U(a->codec,0x53,0xf0,0xf0);
++	U(a->codec,0x5b,0x1f,1);
++	ret=coef(a,c1,sizeof(c1));if(ret)goto fail;
++	ret=coef(a,c2,sizeof(c2));if(ret)goto fail;
++	ret=coef(a,c3,sizeof(c3));if(ret)goto fail;
++	U(a->codec,0x55,0xf0,0x20);
++	U(a->codec,0x21,0x7f,0x41);U(a->codec,0x20,0xc7,0xc1);
++	ret=regmap_write(a->codec,0x58,1);if(ret)goto fail;
++	U(a->pmic,0x61,0x0c,0x0c);U(a->pmic,0x62,0x60,0x20);
++	/* Match vendor delay/polarity but keep the class-D enable clear. */
++	U(a->pmic,0x48,0xf6,0xf0);msleep(20);
++	WRITE_ONCE(a->stream[d].prepared,true);ret=sync_blocks(a);if(ret)goto fail;
++	/* Precharge the analog headphone path while digitally attenuated,
++	 * before ALSA starts consuming any playback samples. */
++	ret=amp(a);if(ret)goto fail;
++	mutex_unlock(&a->lock);return 0;
++fail:
++	dev_err(a->dev,"prepare failed %d\n",ret);
++	drop_route(a,d);mutex_unlock(&a->lock);return ret;
++#undef U
++}
++static const struct snd_pcm_hardware hardware={
++	.info=SNDRV_PCM_INFO_INTERLEAVED,
++	.formats=SNDRV_PCM_FMTBIT_S16_LE,.rates=SNDRV_PCM_RATE_44100,
++	.rate_min=44100,.rate_max=44100,.channels_min=2,.channels_max=2,
++	.buffer_bytes_max=BUFFER,.period_bytes_min=1024,.period_bytes_max=4096,
++	.periods_min=2,.periods_max=16,.fifo_size=32,
++};
++static int pcm_open(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	int ret;
++	mutex_lock(&a->lock);
++	if(a->stream[s->stream].opened){mutex_unlock(&a->lock);return -EBUSY;}
++	a->stream[s->stream].opened=true;mutex_unlock(&a->lock);
++	s->runtime->hw=hardware;
++	snd_pcm_hw_constraint_integer(s->runtime,SNDRV_PCM_HW_PARAM_PERIODS);
++	ret=snd_dmaengine_pcm_open(s,a->stream[s->stream].chan);
++	if(ret){mutex_lock(&a->lock);a->stream[s->stream].opened=false;mutex_unlock(&a->lock);}
++	return ret;
++}
++static int pcm_close(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	int ret;
++	flush_work(&a->amp_work);
++	mutex_lock(&a->lock);drop_route(a,s->stream);mutex_unlock(&a->lock);
++	ret=snd_dmaengine_pcm_close(s);
++	mutex_lock(&a->lock);a->stream[s->stream].opened=false;mutex_unlock(&a->lock);return ret;
++}
++static int hw_params(struct snd_pcm_substream *s,struct snd_pcm_hw_params *p)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	struct dma_slave_config cfg={.direction=DMA_MEM_TO_DEV,
++		.dst_addr=0xd42a0c10,.dst_addr_width=DMA_SLAVE_BUSWIDTH_4_BYTES,.dst_maxburst=4};
++	int ret;
++	if(s->stream==SNDRV_PCM_STREAM_CAPTURE){cfg.direction=DMA_DEV_TO_MEM;cfg.src_addr=0xd42a0c10;
++		cfg.src_addr_width=DMA_SLAVE_BUSWIDTH_4_BYTES;cfg.src_maxburst=4;}
++	if(params_rate(p)!=44100||params_channels(p)!=2||params_format(p)!=SNDRV_PCM_FORMAT_S16_LE)return -EINVAL;
++	ret=dmaengine_slave_config(a->stream[s->stream].chan,&cfg);if(ret)return ret;
++	snd_pcm_set_runtime_buffer(s,&s->dma_buffer);s->runtime->dma_bytes=params_buffer_bytes(p);
++	return 0;
++}
++static int hw_free(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	flush_work(&a->amp_work);
++	mutex_lock(&a->lock);drop_route(a,s->stream);mutex_unlock(&a->lock);
++	snd_pcm_set_runtime_buffer(s,NULL);return 0;
++}
++static int trigger(struct snd_pcm_substream *s,int cmd)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	unsigned long flags;unsigned int mask;int ret;
++	spin_lock_irqsave(&a->reg_lock,flags);
++	if(cmd==SNDRV_PCM_TRIGGER_START){
++		if(!READ_ONCE(a->stream[s->stream].prepared)){ret=-EPIPE;goto out;}
++		/* Discard stale RX samples without resetting the peer's SSP clock. */
++		if(s->stream==SNDRV_PCM_STREAM_CAPTURE){
++			for(int i=0;i<32&&(readl(a->ssp+SSSR)&BIT(3));i++)readl(a->ssp+0x10);
++			writel(BIT(7),a->ssp+SSSR);
++		}
++		ret=snd_dmaengine_pcm_trigger(s,cmd);if(ret)goto out;
++		mask=a->running_mask|BIT(s->stream);
++	}else if(cmd==SNDRV_PCM_TRIGGER_STOP){
++		mask=a->running_mask&~BIT(s->stream);
++	}else{ret=-EINVAL;goto out;}
++	WRITE_ONCE(a->running_mask,mask);
++	writel(0x00801dc0|((mask&BIT(0))?BIT(21):0)|((mask&BIT(1))?BIT(20):0),a->ssp+SSCR1);
++	/* Keep clocking through STOP until sleepable sync_stop has ramped down. */
++	if(cmd==SNDRV_PCM_TRIGGER_START)writel(readl(a->ssp+SSCR0)|SSE,a->ssp+SSCR0);
++	ret=cmd==SNDRV_PCM_TRIGGER_STOP?snd_dmaengine_pcm_trigger(s,cmd):0;
++out:
++	spin_unlock_irqrestore(&a->reg_lock,flags);
++	if(!ret)schedule_work(&a->amp_work);
++	return ret;
++}
++/* SQU uses fixed SRAM buffers. Userspace SIMD accesses to an uncached
++ * device mapping can fault; expose buffered read/write access only.
++ */
++static snd_pcm_uframes_t pointer(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	/* SQU's residue callback requires an allocated cyclic descriptor.
++	 * ALSA can query position during cleanup of a failed prepare, before
++	 * the first trigger has allocated one. Do not enter DMA in that state.
++	 */
++	return (READ_ONCE(a->running_mask)&BIT(s->stream))?snd_dmaengine_pcm_pointer(s):0;
++}
++static int sync_stop(struct snd_pcm_substream *s)
++{
++	struct t110_audio *a=snd_pcm_substream_chip(s);
++	int ret=snd_dmaengine_pcm_sync_stop(s);
++	flush_work(&a->amp_work);
++	/* The codec's volume ramp runs before the final I2S clock is stopped. */
++	if(s->stream==SNDRV_PCM_STREAM_PLAYBACK)msleep(20);
++	clock_idle(a);return ret;
++}
++static const struct snd_pcm_ops pcm_ops={.open=pcm_open,.close=pcm_close,.ioctl=snd_pcm_lib_ioctl,
++	.hw_params=hw_params,.hw_free=hw_free,.prepare=prepare,.trigger=trigger,
++	.pointer=pointer,.sync_stop=sync_stop};
++static int ctl_info(struct snd_kcontrol *k,struct snd_ctl_elem_info *i)
++{
++	i->type=k->private_value==1?SNDRV_CTL_ELEM_TYPE_BOOLEAN:SNDRV_CTL_ELEM_TYPE_INTEGER;
++	i->count=1;i->value.integer.min=0;i->value.integer.max=k->private_value==1?1:(k->private_value==3?31:91);return 0;
++}
++static int ctl_get(struct snd_kcontrol *k,struct snd_ctl_elem_value *v)
++{
++	struct t110_audio *a=snd_kcontrol_chip(k);
++	mutex_lock(&a->lock);
++	v->value.integer.value[0]=k->private_value==1?a->switch_on:(k->private_value==2?a->hp_volume:(k->private_value==3?a->mic_gain:a->volume));
++	mutex_unlock(&a->lock);return 0;
++}
++static int ctl_put(struct snd_kcontrol *k,struct snd_ctl_elem_value *v)
++{
++	struct t110_audio *a=snd_kcontrol_chip(k);
++	long n=v->value.integer.value[0];int ret=0,changed;
++	if(n<0||n>(k->private_value==1?1:(k->private_value==3?31:91)))return -EINVAL;
++	mutex_lock(&a->lock);
++	if(k->private_value==1){changed=a->switch_on!=n;a->switch_on=n;if(a->stream[0].prepared)ret=amp(a);}
++	else if(k->private_value==2){
++		changed=a->hp_volume!=n;
++		if(a->stream[0].prepared&&(READ_ONCE(a->running_mask)&BIT(0))&&a->switch_on&&a->headphones)ret=hp_gain(a,n+92);
++		if(!ret)a->hp_volume=n;
++	}else if(k->private_value==3){
++		changed=a->mic_gain!=n;
++		if(a->stream[1].prepared)ret=regmap_update_bits(a->codec,a->mic_source==1?0x13:0x12,0x1f,31-n);
++		if(!ret)a->mic_gain=n;
++	}else {changed=a->volume!=n;if(a->stream[0].prepared&&(READ_ONCE(a->running_mask)&BIT(0))&&a->switch_on&&!a->headphones)ret=regmap_write(a->codec,0x58,n+92);if(!ret)a->volume=n;}
++	mutex_unlock(&a->lock);return ret?:changed;
++}
++static const DECLARE_TLV_DB_SCALE(volume_tlv,-4550,50,0);
++static int source_info(struct snd_kcontrol *k,struct snd_ctl_elem_info *i)
++{
++	static const char * const names[]={"Built-in Mic","Mic 2","Headset Mic"};
++	return snd_ctl_enum_info(i,1,ARRAY_SIZE(names),names);
++}
++static int source_get(struct snd_kcontrol *k,struct snd_ctl_elem_value *v)
++{
++	struct t110_audio *a=snd_kcontrol_chip(k);
++	mutex_lock(&a->lock);v->value.enumerated.item[0]=a->mic_source;mutex_unlock(&a->lock);return 0;
++}
++static int source_put(struct snd_kcontrol *k,struct snd_ctl_elem_value *v)
++{
++	struct t110_audio *a=snd_kcontrol_chip(k);unsigned int n=v->value.enumerated.item[0];int changed;
++	if(n>2)return -EINVAL;
++	mutex_lock(&a->lock);
++	/* UCM may reapply the active route after opening capture. */
++	if(a->mic_source==n){mutex_unlock(&a->lock);return 0;}
++	if(a->stream[SNDRV_PCM_STREAM_CAPTURE].opened){mutex_unlock(&a->lock);return -EBUSY;}
++	changed=a->mic_source!=n;a->mic_source=n;
++	{int ret=mic_bias(a,false);mutex_unlock(&a->lock);return ret?:changed;}
++}
++static const struct snd_kcontrol_new controls[]={
++	{.iface=SNDRV_CTL_ELEM_IFACE_MIXER,.name="Speaker Playback Volume",.access=SNDRV_CTL_ELEM_ACCESS_READWRITE|SNDRV_CTL_ELEM_ACCESS_TLV_READ,.info=ctl_info,.get=ctl_get,.put=ctl_put,.tlv.p=volume_tlv},
++	{.iface=SNDRV_CTL_ELEM_IFACE_MIXER,.name="Speaker Playback Switch",.info=ctl_info,.get=ctl_get,.put=ctl_put,.private_value=1},
++	{.iface=SNDRV_CTL_ELEM_IFACE_MIXER,.name="Headphone Playback Volume",.access=SNDRV_CTL_ELEM_ACCESS_READWRITE|SNDRV_CTL_ELEM_ACCESS_TLV_READ,.info=ctl_info,.get=ctl_get,.put=ctl_put,.tlv.p=volume_tlv,.private_value=2},
++	{.iface=SNDRV_CTL_ELEM_IFACE_MIXER,.name="Mic Capture Volume",.info=ctl_info,.get=ctl_get,.put=ctl_put,.private_value=3},
++	{.iface=SNDRV_CTL_ELEM_IFACE_MIXER,.name="Capture Source",.info=source_info,.get=source_get,.put=source_put},
++};
++static ssize_t state_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++	struct t110_audio *a=dev_get_drvdata(dev);unsigned int power=0,ampv=0,sai=0;
++	int n;
++	mutex_lock(&a->lock);
++	regmap_read(a->codec,1,&power);regmap_read(a->codec,0x31,&sai);regmap_read(a->pmic,0x48,&ampv);
++	n=sysfs_emit(buf,"powered=%u prepared_play=%u prepared_cap=%u running_mask=%u switch=%u headphones=%u codec_power=%02x sai=%02x classd=%02x SSCR0=%08x SSCR1=%08x SSSR=%08x ISCCR=%08x TX_BUFFER=%pad RX_BUFFER=%pad TX_SRC=%08x RX_DST=%08x TX_CTRL=%08x RX_CTRL=%08x\n",a->powered,a->stream[0].prepared,a->stream[1].prepared,READ_ONCE(a->running_mask),a->switch_on,a->headphones,power,sai,ampv,readl(a->ssp),readl(a->ssp+4),readl(a->ssp+8),readl(a->isccr),&a->stream[0].buffer_addr,&a->stream[1].buffer_addr,readl(a->dma_debug+0x10),readl(a->dma_debug+0x24),readl(a->dma_debug+0x40),readl(a->dma_debug+0x44));
++	mutex_unlock(&a->lock);return n;
++}
++static DEVICE_ATTR_RO(state);
++static ssize_t registers_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++	struct t110_audio *a=dev_get_drvdata(dev);unsigned int v;int n=0,ret;
++	static const u8 regs[]={0,1,0xb,0xc,0x10,0x11,0x12,0x13,0x16,0x20,0x21,0x26,0x30,0x31,0x32,0x3a,0x3c,0x50,0x51,0x52,0x53,0x55,0x56,0x57,0x58,0x5b,0x80,0x81,0x90,0x94,0x95,0x98};
++	mutex_lock(&a->lock);
++	for(int i=0;i<ARRAY_SIZE(regs);i++){
++		ret=regmap_read(a->codec,regs[i],&v);if(ret){n=sysfs_emit_at(buf,n,"error=%d reg=%02x\n",ret,regs[i]);break;}
++		n+=sysfs_emit_at(buf,n,"%02x=%02x ",regs[i],v);
++	}
++	n+=sysfs_emit_at(buf,n,"\nPM822 ");
++	{static const u8 preg[]={0xd0,0xe2,0x50,0x55};
++	for(int i=0;i<ARRAY_SIZE(preg);i++){ret=regmap_read(a->pmic,preg[i],&v);if(ret)break;n+=sysfs_emit_at(buf,n,"%02x=%02x ",preg[i],v);}}
++	n+=sysfs_emit_at(buf,n,"\n");mutex_unlock(&a->lock);return n;
++}
++static DEVICE_ATTR_RO(registers);
++static void pcm_free(struct snd_pcm *pcm)
++{
++	/* SRAM belongs to the gen_pool action, not ALSA's DMA allocator. */
++	pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream->dma_buffer.area=NULL;
++	pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream->dma_buffer.area=NULL;
++}
++static void release_card(void *d){snd_card_free(d);}
++static void release_device(void *d){put_device(d);}
++static void release_dma(void *d){dma_release_channel(d);}
++static void release_buffer(void *d){struct t110_stream *st=d;gen_pool_free(st->pool,(unsigned long)st->buffer,BUFFER);}
++static int audio_probe(struct platform_device *pdev)
++{
++	struct device *dev=&pdev->dev;struct device_node *np;struct i2c_client *client;
++	struct t110_audio *a;struct snd_card *card;struct snd_pcm *pcm;unsigned int id;int ret;
++	if(!of_machine_is_compatible("samsung,goyawifi"))return -ENODEV;
++	np=of_parse_phandle(dev->of_node,"codec",0);if(!np)return -EINVAL;
++	client=of_find_i2c_device_by_node(np);of_node_put(np);if(!client)return -EPROBE_DEFER;
++	devm_add_action_or_reset(dev,release_device,&client->dev);
++	a=devm_kzalloc(dev,sizeof(*a),GFP_KERNEL);if(!a)return -ENOMEM;
++	a->client=client;a->codec=dev_get_regmap(&client->dev,NULL);if(!a->codec)return -EPROBE_DEFER;
++	a->pmic_dev=bus_find_device_by_name(&i2c_bus_type,NULL,"2-0030");if(!a->pmic_dev)return -EPROBE_DEFER;
++	devm_add_action_or_reset(dev,release_device,a->pmic_dev);a->pmic=dev_get_regmap(a->pmic_dev,NULL);if(!a->pmic)return -EPROBE_DEFER;
++	{struct device *pd=bus_find_device_by_name(&i2c_bus_type,NULL,"2-0031");if(!pd)return -EPROBE_DEFER;
++	devm_add_action_or_reset(dev,release_device,pd);a->power=dev_get_regmap(pd,NULL);if(!a->power)return -EPROBE_DEFER;}
++	ret=regmap_read(a->codec,0,&id);if(ret||id!=6)return ret?:-ENODEV;
++	a->dev=dev;a->volume=55;a->hp_volume=31;a->mic_gain=13;mutex_init(&a->lock);INIT_WORK(&a->amp_work,amp_work);
++	spin_lock_init(&a->reg_lock);
++	INIT_DELAYED_WORK(&a->jack_work,jack_poll);
++	a->ssp=devm_platform_ioremap_resource(pdev,0);if(IS_ERR(a->ssp))return PTR_ERR(a->ssp);
++	a->apbc=devm_platform_ioremap_resource(pdev,1);if(IS_ERR(a->apbc))return PTR_ERR(a->apbc);
++	a->isccr=devm_platform_ioremap_resource(pdev,2);if(IS_ERR(a->isccr))return PTR_ERR(a->isccr);
++	a->squ_gate=devm_platform_ioremap_resource(pdev,3);if(IS_ERR(a->squ_gate))return PTR_ERR(a->squ_gate);
++	a->fccr=devm_ioremap(dev,0xd4050008,4);a->pins=devm_ioremap(dev,0xd401e130,16);if(!a->fccr||!a->pins)return -ENOMEM;
++	a->dma_debug=devm_ioremap(dev,0xd42a0800,0x100);if(!a->dma_debug)return -ENOMEM;
++	writel(readl(a->squ_gate)|BIT(30),a->squ_gate);
++	writel(3,a->apbc);udelay(10);
++	a->pool=of_gen_pool_get(dev->of_node,"asram",0);if(!a->pool)return -EPROBE_DEFER;
++	for(int i=0;i<2;i++){
++		struct t110_stream *st=&a->stream[i];
++		st->chan=dma_request_chan(dev,i?"rx":"tx");
++		if(IS_ERR(st->chan))return dev_err_probe(dev,PTR_ERR(st->chan),"direction %d DMA unavailable\n",i);
++		devm_add_action_or_reset(dev,release_dma,st->chan);
++		st->pool=a->pool;st->buffer=gen_pool_dma_alloc(a->pool,BUFFER,&st->buffer_addr);
++		if(!st->buffer)return -ENOMEM;
++		devm_add_action_or_reset(dev,release_buffer,st);memset(st->buffer,0,BUFFER);
++	}
++	ret=snd_card_new(dev,-1,"T110Audio",THIS_MODULE,0,&card);if(ret)return ret;
++	a->card=card;ret=devm_add_action_or_reset(dev,release_card,card);if(ret)return ret;
++	strscpy(card->driver,"t110-audio");strscpy(card->shortname,"SM-T110 Audio");strscpy(card->longname,"SM-T110 PM805 SSP1/SQU audio");
++	ret=snd_pcm_new(card,"PM805 I2S",0,1,1,&pcm);if(ret)return ret;
++	pcm->private_data=a;pcm->private_free=pcm_free;
++	for(int i=0;i<2;i++){
++		snd_pcm_set_ops(pcm,i,&pcm_ops);
++		pcm->streams[i].substream->dma_buffer=(struct snd_dma_buffer){.area=a->stream[i].buffer,.addr=a->stream[i].buffer_addr,.bytes=BUFFER};
++	}
++	for(int i=0;i<ARRAY_SIZE(controls);i++){ret=snd_ctl_add(card,snd_ctl_new1(&controls[i],a));if(ret)return ret;}
++	off(a);platform_set_drvdata(pdev,a);ret=device_create_file(dev,&dev_attr_state);if(ret)return ret;
++	ret=device_create_file(dev,&dev_attr_registers);if(ret)return ret;
++	ret=snd_jack_new(card,"Headphone",SND_JACK_HEADPHONE,&a->jack,true,false);if(ret)return ret;
++	ret=regmap_update_bits(a->pmic,0x38,BIT(7),BIT(7));if(ret)return ret;
++	ret=snd_card_register(card);if(ret)return ret;
++	schedule_delayed_work(&a->jack_work,0);
++	dev_info(dev,"T110_AUDIO_X: duplex, independent TX=%pad RX=%pad\n",&a->stream[0].buffer_addr,&a->stream[1].buffer_addr);return 0;
++}
++static void audio_remove(struct platform_device *pdev)
++{
++	struct t110_audio *a=platform_get_drvdata(pdev);
++	snd_card_disconnect(a->card);
++	WRITE_ONCE(a->stopping,true);cancel_delayed_work_sync(&a->jack_work);
++	cancel_work_sync(&a->amp_work);mutex_lock(&a->lock);off(a);mutex_unlock(&a->lock);
++	device_remove_file(&pdev->dev,&dev_attr_state);
++	device_remove_file(&pdev->dev,&dev_attr_registers);
++}
++static void audio_shutdown(struct platform_device *pdev)
++{
++	struct t110_audio *a=platform_get_drvdata(pdev);
++	WRITE_ONCE(a->stopping,true);cancel_delayed_work_sync(&a->jack_work);
++	WRITE_ONCE(a->running_mask,0);cancel_work_sync(&a->amp_work);off(a);
++}
++static const struct of_device_id audio_of[]={{.compatible="samsung,t110-audio"},{}};
++MODULE_DEVICE_TABLE(of,audio_of);
++static struct platform_driver audio_driver={.probe=audio_probe,.remove=audio_remove,.shutdown=audio_shutdown,.driver={.name="t110-audio",.of_match_table=audio_of}};
++static int codec_probe(struct i2c_client *client)
++{
++	static const struct regmap_config cfg={.reg_bits=8,.val_bits=8,.max_register=0x98};
++	struct regmap *map,*pmic;struct device *pmic_dev;unsigned int id;int ret;
++	if(!of_machine_is_compatible("samsung,goyawifi")||client->addr!=0x38||client->adapter->nr!=2)return -ENODEV;
++	/* A full PMIC power-off resets the oscillator modes. The codec's I2C
++	 * interface needs this clock before its first ID read, not just PCM prepare. */
++	pmic_dev=bus_find_device_by_name(&i2c_bus_type,NULL,"2-0030");if(!pmic_dev)return -EPROBE_DEFER;
++	pmic=dev_get_regmap(pmic_dev,NULL);
++	ret=pmic?pm822_audio_clocks(pmic):-EPROBE_DEFER;put_device(pmic_dev);if(ret)return ret;
++	map=devm_regmap_init_i2c(client,&cfg);if(IS_ERR(map))return PTR_ERR(map);
++	ret=regmap_read(map,0,&id);return ret?ret:id==6?0:-ENODEV;
++}
++static const struct of_device_id codec_of[]={{.compatible="samsung,t110-pm805-audio"},{}};
++MODULE_DEVICE_TABLE(of,codec_of);
++static struct i2c_driver codec_driver={.probe=codec_probe,.driver={.name="t110-pm805-audio",.of_match_table=codec_of}};
++static int __init audio_init(void){int r=i2c_add_driver(&codec_driver);if(r)return r;r=platform_driver_register(&audio_driver);if(r)i2c_del_driver(&codec_driver);return r;}
++static void __exit audio_exit(void){platform_driver_unregister(&audio_driver);i2c_del_driver(&codec_driver);}
++module_init(audio_init);module_exit(audio_exit);
++MODULE_LICENSE("GPL");MODULE_DESCRIPTION("SM-T110 PM805 full-duplex audio");

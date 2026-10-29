@@ -1,0 +1,13 @@
+/kernel-work/
+/build-goyawifi/
+/stage-goyawifi/
+__pycache__/
+*.pyc
+*.img
+*.apk
+*.ko
+*.ko.zst
+*.pem
+*.key
+*.rsa
+.env

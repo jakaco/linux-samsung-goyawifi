@@ -1,0 +1,4 @@
+# Display and touch use normal module dependencies and OF modaliases.
+t110_drm
+t110_vx5b3d
+etnaviv

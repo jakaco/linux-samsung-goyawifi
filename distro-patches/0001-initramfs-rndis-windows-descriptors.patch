@@ -1,0 +1,36 @@
+--- a/main/postmarketos-initramfs/init_functions.sh
++++ b/main/postmarketos-initramfs/init_functions.sh
+@@ -886,6 +886,33 @@
+ 	fi
+ 
+ 
++	# Advertise the standard RNDIS interface and Microsoft OS descriptors.
++	# Windows otherwise has no compatible driver for a generic Linux VID/PID.
++	case "$usb_network_function" in
++		rndis.*)
++			echo 0x0100 > "$CONFIGFS/g1/bcdDevice"
++			echo 0xef > "$CONFIGFS/g1/bDeviceClass"
++			echo 0x02 > "$CONFIGFS/g1/bDeviceSubClass"
++			echo 0x01 > "$CONFIGFS/g1/bDeviceProtocol"
++			local rndis="$CONFIGFS/g1/functions/$usb_network_function"
++			if [ -e "$rndis/class" ]; then
++				echo e0 > "$rndis/class"
++				echo 1 > "$rndis/subclass"
++				echo 3 > "$rndis/protocol"
++			elif [ -e "$rndis/wceis" ]; then
++				echo 1 > "$rndis/wceis"
++			fi
++			if [ -d "$rndis/os_desc/interface.rndis" ]; then
++				echo RNDIS > "$rndis/os_desc/interface.rndis/compatible_id"
++				echo 5162001 > "$rndis/os_desc/interface.rndis/sub_compatible_id"
++				echo 1 > "$CONFIGFS/g1/os_desc/use"
++				echo 0xcd > "$CONFIGFS/g1/os_desc/b_vendor_code"
++				echo MSFT100 > "$CONFIGFS/g1/os_desc/qw_sign"
++				ln -s "$CONFIGFS/g1/configs/c.1" "$CONFIGFS/g1/os_desc/c.1"
++			fi
++			;;
++	esac
++
+ 	# Link the network instance to the configuration
+ 	ln -s $CONFIGFS/g1/functions/"$usb_network_function" $CONFIGFS/g1/configs/c.1 \
+ 		|| echo "  Couldn't symlink $usb_network_function"

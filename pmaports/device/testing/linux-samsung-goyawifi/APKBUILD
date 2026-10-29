@@ -1,0 +1,51 @@
+# Local overlay. Set a real maintainer before submitting upstream.
+maintainer=""
+_flavor=samsung-goyawifi
+pkgname=linux-$_flavor
+pkgver=7.3_rc7
+pkgrel=10
+pkgdesc="Samsung SM-T110 PXA986 close-to-mainline kernel"
+arch="armv7"
+_carch="arm"
+url="https://kernel.org"
+license="GPL-2.0-only"
+options="!check !strip !tracedeps pmb:cross-native pmb:kconfigcheck-default pmb:kconfigcheck-nftables pmb:kconfigcheck-usb pmb:kconfigcheck-usb_gadgets pmb:kconfigcheck-zram pmb:kconfigcheck-iwd pmb:kconfigcheck-wireguard"
+makedepends="bc bison clang dtc elfutils-dev findutils flex linux-headers lld llvm openssl-dev pahole>=1.26 perl postmarketos-installkernel python3 zstd"
+_commit=f909e534f5e34feb2ea2701d54df63e21aa506fc
+_config=config-$_flavor.$arch
+source="
+ linux-$_commit.tar.gz::https://github.com/torvalds/linux/archive/$_commit.tar.gz
+ $_config
+ 0001-arm-pxa986-goyawifi-platform.patch
+ 0002-input-power-and-shared-i2c.patch
+ 0003-display-gpu-audio-camera-and-vpu.patch
+ 0004-sd8777-wifi-bluetooth.patch
+"
+builddir="$srcdir/linux-$_commit"
+prepare() {
+ default_prepare
+ cp "$srcdir/$_config" "$builddir/.config"
+}
+build() {
+ unset LDFLAGS
+ make ARCH="$_carch" LLVM=1 KBUILD_BUILD_VERSION="$((pkgrel+1))-$_flavor" olddefconfig
+ make ARCH="$_carch" LLVM=1 KBUILD_BUILD_VERSION="$((pkgrel+1))-$_flavor" zImage modules marvell/pxa986-samsung-goyawifi.dtb
+}
+package() {
+ make ARCH="$_carch" LLVM=1 INSTALL_MOD_STRIP=1 INSTALL_MOD_PATH="$pkgdir/usr" modules_install
+ install -Dm644 arch/arm/boot/zImage "$pkgdir/boot/vmlinuz"
+ install -Dm644 System.map "$pkgdir/boot/System.map"
+ install -Dm644 .config "$pkgdir/boot/config"
+ install -Dm644 arch/arm/boot/dts/marvell/pxa986-samsung-goyawifi.dtb "$pkgdir/boot/dtbs/marvell/pxa986-samsung-goyawifi.dtb"
+ install -Dm644 include/config/kernel.release "$pkgdir/usr/share/kernel/$_flavor/kernel.release"
+ rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+}
+
+sha512sums="
+83cfa4c87e9c354e6a434c5a53c19ba97b5650fb7321da056952f58418f0773dd6129c8959a431d3c8482fec8f7170e6a99df17709552eddd387597fe25de866  linux-f909e534f5e34feb2ea2701d54df63e21aa506fc.tar.gz
+74f0c0e646134d95ac03427b30d671a0f1d96fe28856d4bf8a283382bc7e72d9b0f73ae3870abe3128613c27d9249973470d92995689266d23cc6a8e4d632851  config-samsung-goyawifi.armv7
+c13789434a0942a30086106cad247a8b84cdc37c4ad8f7b3aed66c3b5238f080ae91243b1668c3ffb36b51a565716f6ea148b1c7929829081079919827415876  0001-arm-pxa986-goyawifi-platform.patch
+955107812c1aabfd5343ebf80994a28feabbae1d835c7b5d0f4799072d4fe6ea02c918892f499563c60a9e9def3b4ffd55fe80d81f22e6ed0f6fc9eaeba1eb30  0002-input-power-and-shared-i2c.patch
+8b8bf5d81a9e9bda285b8eb04237c3faae3e38877f4be349417debd4cddd2f73be94a7890155acaecb0a1759d43351cfe1df7e58ef9fee7cb4e340590bb75fdd  0003-display-gpu-audio-camera-and-vpu.patch
+84b2119594b8e86d26c3bf43369f9b89347bad30c152fe12d51ce1887222ed20914d6c70ef1ef8626ff2e1980331a6c1a838c3574ebb99fad0efadfe7c848339  0004-sd8777-wifi-bluetooth.patch
+"

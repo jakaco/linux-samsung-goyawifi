@@ -1,0 +1,24 @@
+# Local board-specific packer using the standard boot-deploy PXA interface.
+maintainer=""
+pkgname=goyawifi-mkbootimg
+pkgver=1
+pkgrel=0
+pkgdesc="SM-T110 distro initramfs/DT handoff for Samsung's legacy loader"
+url="https://postmarketos.org"
+arch="noarch"
+license="MIT"
+depends="python3 dtc"
+checkdepends="python3 dtc"
+provides="pxa-mkbootimg=1"
+source="goyawifi-mkbootimg test-image-layout.py"
+builddir="$srcdir"
+check() { python3 test-image-layout.py; }
+package() {
+ install -Dm755 goyawifi-mkbootimg "$pkgdir/usr/bin/goyawifi-mkbootimg"
+ ln -s goyawifi-mkbootimg "$pkgdir/usr/bin/pxa-mkbootimg"
+}
+
+sha512sums="
+0409e871f9e1241d14fc96209436558825781b48804adf9cfbbbcb2264b2c798b54ebb78e604eb216ee4f48a72daffbde1703e29e330284a362ae100d69103b3  goyawifi-mkbootimg
+f09bf60a54762bfc7a524435491577e95ce17d18bb91225b90641adb6ff6f4d5d40058e4f79726c74c1c60fb09efeffe09c365c2f7045e7ff73acc51d4cff488  test-image-layout.py
+"

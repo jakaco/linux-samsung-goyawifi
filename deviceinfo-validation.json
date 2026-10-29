@@ -1,0 +1,11 @@
+{
+  "name": "Samsung Galaxy Tab 3 Lite SM-T110",
+  "arch": "armv7",
+  "dtb": "marvell/pxa986-samsung-goyawifi",
+  "append_dtb": "true",
+  "flash_method": "heimdall-bootimg",
+  "flash_pagesize": "2048",
+  "flash_heimdall_partition_kernel": "KERNEL",
+  "flash_heimdall_partition_rootfs": "USER",
+  "flash_kernel_on_update": "true"
+}

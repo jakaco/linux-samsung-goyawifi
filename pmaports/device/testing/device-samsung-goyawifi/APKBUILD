@@ -1,0 +1,43 @@
+# Local overlay. Set a real maintainer before submitting upstream.
+maintainer=""
+pkgname=device-samsung-goyawifi
+pkgdesc="Samsung Galaxy Tab 3 Lite SM-T110 (close-to-mainline)"
+pkgver=5
+pkgrel=6
+url="https://postmarketos.org"
+license="MIT"
+arch="armv7"
+options="!check !archcheck"
+depends="postmarketos-base postmarketos-initramfs>=3.12.5-r2 linux-samsung-goyawifi goyawifi-mkbootimg alsa-ucm-conf mesa-dri-gallium"
+makedepends="devicepkg-dev"
+source="deviceinfo kernel-cmdline.conf modules-initfs modules-load.conf modprobe.conf 90-goyawifi.rules T110Audio.conf HiFi.conf 20-goyawifi-modprobe.files"
+subpackages="$pkgname-nonfree-firmware:nonfree_firmware"
+build() { devicepkg_build "$startdir" "$pkgname"; }
+package() {
+ devicepkg_package "$startdir" "$pkgname"
+ install -Dm644 "$srcdir/20-goyawifi-modprobe.files" "$pkgdir/usr/share/mkinitfs/files/20-goyawifi-modprobe.files"
+ install -Dm644 "$srcdir/90-goyawifi.rules" "$pkgdir/usr/lib/udev/rules.d/90-goyawifi.rules"
+ install -Dm644 "$srcdir/T110Audio.conf" "$pkgdir/usr/share/alsa/ucm2/T110Audio/T110Audio.conf"
+ install -Dm644 "$srcdir/HiFi.conf" "$pkgdir/usr/share/alsa/ucm2/T110Audio/HiFi.conf"
+ mkdir -p "$pkgdir/usr/share/alsa/ucm2/conf.d/t110-audio"
+ ln -s ../../T110Audio/T110Audio.conf "$pkgdir/usr/share/alsa/ucm2/conf.d/t110-audio/t110-audio.conf"
+ mkdir -p "$pkgdir/usr/lib/dri"
+ ln -s libdril_dri.so "$pkgdir/usr/lib/dri/t110-drm_dri.so"
+}
+nonfree_firmware() {
+ pkgdesc="SM-T110 optional SD8777 Wi-Fi/Bluetooth firmware"
+ depends="firmware-samsung-goyawifi wireless-regdb"
+ mkdir -p "$subpkgdir"
+}
+
+sha512sums="
+2f334bc6503c8423f2729b6e481630f3911360ccd8441f62008547d88b850a5cdd33e3ee5b4bfe97547758a2aa8d6e9631ecd9884465815054af8136bb1e1b07  deviceinfo
+746c640370559c27bfc7b3e80ca72552c540785d264cb46c0cf2a3e31c312a7167861c3ad40e9cf553d160714567c9c5095b82ca60132d0f2fc638885cd263bc  kernel-cmdline.conf
+9bd44ea7558fbdc290ea667423425eabad6c0262c34de6a37bd0e8884c12715e79054841a42255b0dfe8a7499f5f825ecec4e0956d50f83fe9c1e84da39c7b41  modules-initfs
+47c759f6d34a012946d4a9df7f2f14e7932d2c7095aaadbd5fca52fb6a8d92c77f09f2b2df44e10fe35052abc7cc4bb1652fef003d19755de3fbfffe9805f925  modules-load.conf
+102cb1fc71f9786b565c824d02f8fa67dab7dd308f3f8dbb02e204107a0ee5a4518272353b8b7b3441c2e7baed824a6ad00890a21f6c1d5d7eb04d19b85848c8  modprobe.conf
+31423d3595b2f27a4c29f8e335d2d5112a6300f5a8202ced5fcadbdcee32f8c9036aaf7b64f27034c2cee3d2a5445e566568ca81b34eb5118a39e576562dfd1a  90-goyawifi.rules
+5ffa1cb4fd203ab44b6594e396f0bdf3fe62b4c5ade5d651fa8661484853703c64d9e149b2feb361d380e4cefe524ff22752fa5afa8a0feed674fc01ce2f432b  T110Audio.conf
+024b378505ce6056bf67402f0d3af3957b8835d7f4a43dc1ec7007d84906c4b875983aa9d3ebe603547bae54f96c8509f2e3684688a2cb8b4c01b8a3e0636698  HiFi.conf
+1bf1a8711e308419fb93ccf861a668a7e11c583fa028300c2cab37a9cc9dea8b183c8a47cc6c4992d500948032c38938b45b1e1d65150304c616e55731d8ef38  20-goyawifi-modprobe.files
+"

@@ -1,0 +1,1147 @@
+Subject: [PATCH 2/4] SM-T110 local port: input-power-and-shared-i2c
+
+diff --git a/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml b/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
+--- a/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
++++ b/Documentation/devicetree/bindings/input/touchscreen/zinitix,bt400.yaml
+@@ -76,9 +76,10 @@
+   zinitix,mode:
+     description: Mode of reporting touch points. Some modes may not work
+       with a particular ts firmware for unknown reasons. Available modes are
+-      1 and 2. Mode 2 is the default and preferred.
++      0, 1 and 2. Mode 0 uses six-byte contact records and a finger count.
++      Mode 2 is the default and preferred.
+     $ref: /schemas/types.yaml#/definitions/uint32
+-    enum: [1, 2]
++    enum: [0, 1, 2]
+ 
+   linux,keycodes:
+     description:
+diff --git a/drivers/gpio/gpio-pxa.c b/drivers/gpio/gpio-pxa.c
+--- a/drivers/gpio/gpio-pxa.c
++++ b/drivers/gpio/gpio-pxa.c
+@@ -83,6 +83,8 @@
+ 
+ 	int irq0;
+ 	int irq1;
++	int irq_mux;
++	bool s2idle_wake_parent;
+ 	int (*set_wake)(unsigned int gpio, unsigned int on);
+ };
+ 
+@@ -508,7 +510,16 @@
+ 
+ 	if (pchip->set_wake)
+ 		return pchip->set_wake(gpio, on);
+-	else
++	else if (pchip->s2idle_wake_parent) {
++		int parent = pchip->irq_mux;
++
++		if (gpio == 0 && pchip->irq0 > 0)
++			parent = pchip->irq0;
++		else if (gpio == 1 && pchip->irq1 > 0)
++			parent = pchip->irq1;
++		/* Arm the parent as well as the leaf IRQ for shallow s2idle. */
++		return irq_set_irq_wake(parent, on);
++	} else
+ 		return 0;
+ }
+ 
+@@ -652,6 +663,12 @@
+ 
+ 	pchip->irq0 = irq0;
+ 	pchip->irq1 = irq1;
++	pchip->irq_mux = irq_mux;
++	pchip->s2idle_wake_parent = of_machine_is_compatible("samsung,goyawifi") &&
++		device_property_read_bool(&pdev->dev, "samsung,goyawifi-s2idle-wake-parent");
++	/* Keep non-wakeup leaf GPIOs masked while the parent can wake us. */
++	if (pchip->s2idle_wake_parent)
++		pxa_muxed_gpio_chip.flags |= IRQCHIP_MASK_ON_SUSPEND;
+ 
+ 	gpio_reg_base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(gpio_reg_base))
+diff --git a/drivers/i2c/busses/i2c-pxa.c b/drivers/i2c/busses/i2c-pxa.c
+--- a/drivers/i2c/busses/i2c-pxa.c
++++ b/drivers/i2c/busses/i2c-pxa.c
+@@ -1,3 +1,4 @@
++#include <linux/t110-board.h>
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+  *  i2c_adap_pxa.c
+@@ -26,6 +27,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
++#include <linux/ktime.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+@@ -271,6 +273,17 @@
+ 	struct pinctrl_state	*pinctrl_default;
+ 	struct pinctrl_state	*pinctrl_recovery;
+ 	bool			reset_before_xfer;
++ void __iomem *goya_mfp;
++ struct gpio_desc *goya_scl, *goya_sda;
++ u32 goya_pins[2];
++ bool goya_parked;
++ bool goya_bridge_held;
++ u64 goya_recovery_start;
++ u32 goya_recoveries,goya_recovery_failed,goya_max_recovery_us,goya_xfer_timeouts;
++ int (*goya_bridge_on)(void *);
++ void *goya_bridge_data;
++ struct module *goya_bridge_owner;
++
+ };
+ 
+ #define _IBMR(i2c)	((i2c)->reg_ibmr)
+@@ -866,6 +879,7 @@
+ static void i2c_pxa_irq_txempty(struct pxa_i2c *i2c, u32 isr)
+ {
+ 	u32 icr = readl(_ICR(i2c)) & ~(ICR_START|ICR_STOP|ICR_ACKNAK|ICR_TB);
++ bool complete=false;int result=0;
+ 
+  again:
+ 	/*
+@@ -903,7 +917,7 @@
+ 			else
+ 				ret = XFER_NAKED;
+ 		}
+-		i2c_pxa_master_complete(i2c, ret);
++		complete=true;result=ret;
+ 	} else if (isr & ISR_RWM) {
+ 		/*
+ 		 * Read mode.  We have just sent the address byte, and
+@@ -961,18 +975,20 @@
+ 	} else {
+ 		if (i2c->msg->len == 0)
+ 			icr |= ICR_MA;
+-		i2c_pxa_master_complete(i2c, 0);
++		complete=true;
+ 	}
+ 
+ 	i2c->icrlog[i2c->irqlogidx-1] = icr;
+ 
+ 	writel(icr, _ICR(i2c));
+ 	show_state(i2c);
++ if(complete){readl(_ICR(i2c));i2c_pxa_master_complete(i2c,result); }
+ }
+ 
+ static void i2c_pxa_irq_rxfull(struct pxa_i2c *i2c, u32 isr)
+ {
+ 	u32 icr = readl(_ICR(i2c)) & ~(ICR_START|ICR_STOP|ICR_ACKNAK|ICR_TB);
++ bool complete=false;int result=0;
+ 
+ 	/*
+ 	 * Read the byte.
+@@ -989,12 +1005,13 @@
+ 
+ 		icr |= ICR_ALDIE | ICR_TB;
+ 	} else {
+-		i2c_pxa_master_complete(i2c, 0);
++		complete=true;
+ 	}
+ 
+ 	i2c->icrlog[i2c->irqlogidx-1] = icr;
+ 
+ 	writel(icr, _ICR(i2c));
++ if(complete){readl(_ICR(i2c));i2c_pxa_master_complete(i2c,result); }
+ }
+ 
+ #define VALID_INT_SOURCE	(ISR_SSD | ISR_ALD | ISR_ITE | ISR_IRF | \
+@@ -1048,6 +1065,15 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++static irqreturn_t i2c_pxa_locked_handler(int irq,void *data)
++{
++ struct pxa_i2c *i2c=data;irqreturn_t result;
++ spin_lock(&i2c->lock);
++ result=i2c_pxa_handler(irq,data);
++ spin_unlock(&i2c->lock);
++ return result;
++}
++
+ /*
+  * We are protected by the adapter bus mutex.
+  */
+@@ -1062,13 +1088,16 @@
+ 	ret = i2c_pxa_wait_bus_not_busy(i2c);
+ 	if (ret) {
+ 		dev_err(&i2c->adap.dev, "i2c_pxa: timeout waiting for bus free\n");
+-		i2c_recover_bus(&i2c->adap);
++		if (!i2c_recover_bus(&i2c->adap) &&
++		    !i2c_pxa_wait_bus_not_busy(i2c))
++			goto bus_ready;
+ 		goto out;
+ 	}
+ 
+ 	/*
+ 	 * Set master mode.
+ 	 */
++bus_ready:
+ 	ret = i2c_pxa_set_master(i2c);
+ 	if (ret) {
+ 		dev_err(&i2c->adap.dev, "i2c_pxa_set_master: error %d\n", ret);
+@@ -1098,8 +1127,18 @@
+ 	/*
+ 	 * The rest of the processing occurs in the interrupt handler.
+ 	 */
+-	time_left = wait_event_timeout(i2c->wait, i2c->msg_num == 0, HZ * 5);
+-	i2c_pxa_stop_message(i2c);
++	time_left = wait_event_timeout(i2c->wait, i2c->msg_num == 0,
++  i2c->goya_mfp && msg->addr==0x64 && num==1 && msg->len<=16 ?
++  msecs_to_jiffies(100) : HZ * 5);
++ spin_lock_irq(&i2c->lock);
++ if(!time_left && i2c->msg_num && i2c->msg){
++  if(i2c->goya_mfp)i2c->goya_xfer_timeouts++;
++  dev_err(i2c->adap.dev.parent,"T110_XFER_TIMEOUT: addr=%02x flags=%x len=%u ptr=%u num=%u ICR=%x ISR=%x IBMR=%x\n",
++   i2c->msg->addr,i2c->msg->flags,i2c->msg->len,i2c->msg_ptr,i2c->msg_num,
++   readl(_ICR(i2c)),readl(_ISR(i2c)),readl(_IBMR(i2c)));
++ }
++ i2c_pxa_stop_message(i2c);
++ spin_unlock_irq(&i2c->lock);
+ 
+ 	/*
+ 	 * We place the return code in i2c->msg_idx.
+@@ -1424,6 +1463,223 @@
+ 	return pinctrl_select_state(i2c->pinctrl, i2c->pinctrl_default);
+ }
+ 
++
++/* GOYA shares I2C1 with BT532 and VX5B3D. Call only after clients quiesce.
++ * GPIO87/88 MFPR offsets follow the PXA988 GPIO67..98 address map.
++ * Pins remain inputs, preserving pull/drive/sleep configuration. */
++static int goya_bus_init(struct platform_device *pdev, struct pxa_i2c *i2c)
++{
++ int ret;
++ if (!of_machine_is_compatible("samsung,goyawifi") ||
++     !device_property_read_bool(&pdev->dev,"samsung,goyawifi-shared-bus"))return 0;
++ if(i2c->iobase!=0xd4010800)return -EINVAL;
++ i2c->goya_scl=devm_gpiod_get(&pdev->dev,"sleep-scl",GPIOD_IN);
++ if(IS_ERR(i2c->goya_scl))return PTR_ERR(i2c->goya_scl);
++ i2c->goya_sda=devm_gpiod_get(&pdev->dev,"sleep-sda",GPIOD_IN);
++ if(IS_ERR(i2c->goya_sda))return PTR_ERR(i2c->goya_sda);
++ i2c->goya_mfp=devm_ioremap(&pdev->dev,0xd401e208,8);
++ if(!i2c->goya_mfp)return -ENOMEM;
++ for(int i=0;i<2;i++) {
++  i2c->goya_pins[i]=readl(i2c->goya_mfp+i*4);
++  if((i2c->goya_pins[i]&7)!=5)return -EINVAL;
++ }
++ ret=gpiod_get_value_cansleep(i2c->goya_scl);
++ if(ret<0)return ret;
++ dev_info(&pdev->dev,"GOYA bus sleep pins: %08x %08x, IBMR=%x\n",
++  i2c->goya_pins[0],i2c->goya_pins[1],readl(_IBMR(i2c)));
++ return 0;
++}
++static void goya_bus_park(struct pxa_i2c *i2c)
++{
++ if(!i2c->goya_mfp)return;
++ writel(readl(_ICR(i2c))&~ICR_IUE,_ICR(i2c));
++ for(int i=0;i<2;i++)writel(i2c->goya_pins[i]&~7,i2c->goya_mfp+i*4);
++ readl(i2c->goya_mfp);i2c->goya_parked=true;
++}
++static void goya_bus_restore(struct pxa_i2c *i2c)
++{
++ if(!i2c->goya_mfp)return;
++ for(int i=0;i<2;i++)writel(i2c->goya_pins[i],i2c->goya_mfp+i*4);
++ readl(i2c->goya_mfp);i2c->goya_parked=false;
++}
++static int goya_recovery_scl(struct i2c_adapter *adap)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ return gpiod_get_value_cansleep(i2c->goya_scl);
++}
++static int goya_recovery_sda(struct i2c_adapter *adap)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ return gpiod_get_value_cansleep(i2c->goya_sda);
++}
++static void goya_recovery_set_scl(struct i2c_adapter *adap,int value)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ if(value)gpiod_direction_input(i2c->goya_scl);
++ else gpiod_direction_output(i2c->goya_scl,0);
++}
++static void goya_recovery_set_sda(struct i2c_adapter *adap,int value)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ if(value)gpiod_direction_input(i2c->goya_sda);
++ else gpiod_direction_output(i2c->goya_sda,0);
++}
++static void goya_recovery_prepare(struct i2c_adapter *adap)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ u32 before=readl(_IBMR(i2c)),icr=readl(_ICR(i2c)),isr=readl(_ISR(i2c));
++ i2c->goya_recovery_start=ktime_get_ns();i2c->goya_recoveries++;
++ goya_bus_park(i2c);udelay(10);
++ dev_warn(adap->dev.parent,"T110_BUS_RECOVERY: before IBMR=%x ICR=%x ISR=%x parked SCL=%d SDA=%d\n",
++          before,icr,isr,goya_recovery_scl(adap),goya_recovery_sda(adap));
++}
++static void goya_recovery_unprepare(struct i2c_adapter *adap)
++{
++ struct pxa_i2c *i2c=adap->algo_data;
++ int scl,sda;
++ gpiod_direction_input(i2c->goya_scl);gpiod_direction_input(i2c->goya_sda);
++ scl=goya_recovery_scl(adap);sda=goya_recovery_sda(adap);
++ if(scl!=1 || sda!=1)i2c->goya_recovery_failed++;
++ i2c_pxa_reset(i2c);goya_bus_restore(i2c);
++ i2c->goya_max_recovery_us=max_t(u32,i2c->goya_max_recovery_us,div_u64(ktime_get_ns()-i2c->goya_recovery_start,1000));
++ dev_warn(adap->dev.parent,"T110_BUS_RECOVERY: after GPIO SCL=%d SDA=%d IBMR=%x\n",
++          scl,sda,readl(_IBMR(i2c)));
++}
++static void goya_recovery_init(struct pxa_i2c *i2c)
++{
++ struct i2c_bus_recovery_info *bri=&i2c->recovery;
++ if(!i2c->goya_mfp || i2c->adap.bus_recovery_info)return;
++ bri->recover_bus=i2c_generic_scl_recovery;
++ bri->prepare_recovery=goya_recovery_prepare;
++ bri->unprepare_recovery=goya_recovery_unprepare;
++ bri->get_scl=goya_recovery_scl;bri->get_sda=goya_recovery_sda;
++ bri->set_scl=goya_recovery_set_scl;bri->set_sda=goya_recovery_set_sda;
++ i2c->adap.bus_recovery_info=bri;
++ dev_info(i2c->adap.dev.parent,"T110_BUS_RECOVERY: GPIO87/88 open-drain bus clear enabled\n");
++}
++
++/* Bounded component test, called by BT532 with IRQ disabled and IC asleep.
++ * Hold the adapter lock for the entire interval so other users cannot send
++ * traffic through parked pins. This never attempts CPU/system suspend. */
++int i2c_pxa_goya_sleep_test(struct i2c_adapter *adap,unsigned int seconds)
++{
++ struct pxa_i2c *i2c;int ret=0;
++ if(adap->algo!=&i2c_pxa_algorithm || seconds<1 || seconds>5)return -EINVAL;
++ i2c=adap->algo_data;if(!i2c->goya_mfp)return -EOPNOTSUPP;
++ i2c_lock_bus(adap,I2C_LOCK_ROOT_ADAPTER);
++ if(i2c->goya_parked){ret=-EBUSY;goto out;}
++ if((readl(_IBMR(i2c))&3)!=3){ret=-EBUSY;goto out;}
++ goya_bus_park(i2c);
++ if((readl(i2c->goya_mfp)&7)||(readl(i2c->goya_mfp+4)&7))ret=-EIO;
++ clk_disable(i2c->clk);
++ dev_info(adap->dev.parent,"GOYA sleep test: pins parked, clock off for %us\n",seconds);
++ msleep(seconds*1000);
++ {int error=clk_enable(i2c->clk);if(error){ret=error;goto restore;}}
++ i2c_pxa_reset(i2c);
++restore:
++ goya_bus_restore(i2c);
++ if(!ret&&(readl(_IBMR(i2c))&3)!=3)ret=-EIO;
++ dev_info(adap->dev.parent,"GOYA sleep test: restored pins=%08x,%08x IBMR=%x result=%d\n",
++  readl(i2c->goya_mfp),readl(i2c->goya_mfp+4),readl(_IBMR(i2c)),ret);
++out:
++ i2c_unlock_bus(adap,I2C_LOCK_ROOT_ADAPTER);return ret;
++}
++EXPORT_SYMBOL_GPL(i2c_pxa_goya_sleep_test);
++
++/* Cold bridge reset is serialized with every I2C client. The board callback
++ * uses PMIC I2C2 and DSI only while I2C1 pins are parked. */
++int i2c_pxa_goya_bridge_bootstrap(struct i2c_adapter *adap,
++                                int (*action)(void *),void *data)
++{
++ struct pxa_i2c *i2c;int ret,restore;
++ if(!of_machine_is_compatible("samsung,goyawifi") ||
++    adap->algo!=&i2c_pxa_algorithm || !action)return -EINVAL;
++ i2c=adap->algo_data;if(!i2c->goya_mfp)return -EOPNOTSUPP;
++ i2c_lock_bus(adap,I2C_LOCK_ROOT_ADAPTER);
++ if(i2c->goya_parked || (readl(_IBMR(i2c))&3)!=3){ret=-EBUSY;goto out;}
++ goya_bus_park(i2c);clk_disable(i2c->clk);
++ dev_info(adap->dev.parent,"T110_BRIDGE: I2C parked %08x/%08x\n",
++          readl(i2c->goya_mfp),readl(i2c->goya_mfp+4));
++ ret=action(data);
++ restore=clk_enable(i2c->clk);
++ if(!restore)i2c_pxa_reset(i2c);
++ goya_bus_restore(i2c);
++ if(restore)ret=restore;
++ if(!ret&&(readl(_IBMR(i2c))&3)!=3)ret=-EIO;
++ dev_info(adap->dev.parent,"T110_BRIDGE: I2C restored %08x/%08x IBMR=%x result=%d\n",
++          readl(i2c->goya_mfp),readl(i2c->goya_mfp+4),readl(_IBMR(i2c)),ret);
++out:
++ i2c_unlock_bus(adap,I2C_LOCK_ROOT_ADAPTER);return ret;
++}
++EXPORT_SYMBOL_GPL(i2c_pxa_goya_bridge_bootstrap);
++
++/* Called in the bridge's late-suspend phase, after all regular client
++ * callbacks stopped touch and scanout. Pins remain parked across CPU sleep. */
++int i2c_pxa_goya_bridge_suspend(struct i2c_adapter *adap,
++                              int (*off)(void *),int (*on)(void *),
++                              void *data,struct module *owner)
++{
++ struct pxa_i2c *i2c;int ret,repair;
++ if(!of_machine_is_compatible("samsung,goyawifi") ||
++    adap->algo!=&i2c_pxa_algorithm || !off || !on)return -EINVAL;
++ i2c=adap->algo_data;if(!i2c->goya_mfp)return -EOPNOTSUPP;
++ if(!try_module_get(owner))return -ENODEV;
++ i2c_lock_bus(adap,I2C_LOCK_ROOT_ADAPTER);
++ if(i2c->goya_parked || i2c->goya_bridge_held ||
++    (readl(_IBMR(i2c))&3)!=3){ret=-EBUSY;goto release;}
++ goya_bus_park(i2c);
++ ret=off(data);
++ if(ret){
++  /* Restore a powered/programmed slave before reconnecting its pins. */
++  repair=on(data);
++  if(!repair){i2c_pxa_reset(i2c);goya_bus_restore(i2c);goto release;}
++  dev_err(adap->dev.parent,"T110_BRIDGE_PM: off rollback failed %d\n",repair);
++ }
++ i2c->goya_bridge_held=true;i2c->goya_bridge_on=on;
++ i2c->goya_bridge_data=data;i2c->goya_bridge_owner=owner;
++ /* The root adapter lock is already held. The public mark helper would
++  * recursively acquire it; update its protected flag directly here. */
++ set_bit(I2C_ALF_IS_SUSPENDED,&adap->locked_flags);
++ dev_info(adap->dev.parent,"T110_BRIDGE_PM: pins held parked across suspend, off_result=%d\n",ret);
++ i2c_unlock_bus(adap,I2C_LOCK_ROOT_ADAPTER);return ret;
++release:
++ i2c_unlock_bus(adap,I2C_LOCK_ROOT_ADAPTER);module_put(owner);return ret;
++}
++EXPORT_SYMBOL_GPL(i2c_pxa_goya_bridge_suspend);
++
++static int goya_bridge_resume_early(struct pxa_i2c *i2c)
++{
++ int ret;struct module *owner;
++ if(!i2c->goya_bridge_held)return 0;
++ i2c_lock_bus(&i2c->adap,I2C_LOCK_ROOT_ADAPTER);
++ ret=i2c->goya_bridge_on(i2c->goya_bridge_data);
++ if(!ret){
++  i2c_pxa_reset(i2c);goya_bus_restore(i2c);
++  if((readl(_IBMR(i2c))&3)!=3)ret=-EIO;
++ }
++ if(ret){
++  goya_bus_park(i2c);
++  dev_err(i2c->adap.dev.parent,"T110_BRIDGE_PM: resume failed %d; bus kept parked\n",ret);
++  i2c_unlock_bus(&i2c->adap,I2C_LOCK_ROOT_ADAPTER);return ret;
++ }
++ owner=i2c->goya_bridge_owner;i2c->goya_bridge_held=false;
++ i2c->goya_bridge_on=NULL;i2c->goya_bridge_data=NULL;i2c->goya_bridge_owner=NULL;
++ dev_info(i2c->adap.dev.parent,"T110_BRIDGE_PM: bridge ready, pins restored %08x/%08x IBMR=%x\n",
++          readl(i2c->goya_mfp),readl(i2c->goya_mfp+4),readl(_IBMR(i2c)));
++ i2c_unlock_bus(&i2c->adap,I2C_LOCK_ROOT_ADAPTER);module_put(owner);return 0;
++}
++
++static ssize_t bus_health_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++ struct pxa_i2c *i2c=dev_get_drvdata(dev);
++ return sysfs_emit(buf,"mode=irq bridge_timeout_ms=100 timeouts=%u recoveries=%u failed=%u max_recovery_us=%u\n",
++  READ_ONCE(i2c->goya_xfer_timeouts),READ_ONCE(i2c->goya_recoveries),
++  READ_ONCE(i2c->goya_recovery_failed),READ_ONCE(i2c->goya_max_recovery_us));
++}
++static DEVICE_ATTR_RO(bus_health);
++static struct attribute *goya_health_attrs[]={&dev_attr_bus_health.attr,NULL};
++static const struct attribute_group goya_health_group={.attrs=goya_health_attrs};
++
+ static int i2c_pxa_probe(struct platform_device *dev)
+ {
+ 	struct i2c_pxa_platform_data *plat = dev_get_platdata(&dev->dev);
+@@ -1524,7 +1780,7 @@
+ 		i2c->adap.algo = &i2c_pxa_pio_algorithm;
+ 	} else {
+ 		i2c->adap.algo = &i2c_pxa_algorithm;
+-		ret = devm_request_irq(&dev->dev, irq, i2c_pxa_handler,
++		ret = devm_request_irq(&dev->dev, irq, i2c_pxa_locked_handler,
+ 				IRQF_SHARED | IRQF_NO_SUSPEND,
+ 				dev_name(&dev->dev), i2c);
+ 		if (ret) {
+@@ -1544,11 +1800,19 @@
+ 	else
+ 		i2c_pxa_reset(i2c);
+ 
++	ret = goya_bus_init(dev,i2c);
++	if(ret)goto ereqirq;
++ goya_recovery_init(i2c);
+ 	ret = i2c_add_numbered_adapter(&i2c->adap);
+ 	if (ret < 0)
+ 		goto ereqirq;
+-
+ 	platform_set_drvdata(dev, i2c);
++ if(i2c->goya_mfp){
++  ret=devm_device_add_group(&dev->dev,&goya_health_group);
++  if(ret){i2c_del_adapter(&i2c->adap);goto ereqirq;}
++ }
++
++
+ 
+ #ifdef CONFIG_I2C_PXA_SLAVE
+ 	dev_info(&i2c->adap.dev, " PXA I2C adapter, slave address %d\n",
+@@ -1576,6 +1840,7 @@
+ {
+ 	struct pxa_i2c *i2c = dev_get_drvdata(dev);
+ 
++	if(!i2c->goya_bridge_held)goya_bus_park(i2c);
+ 	clk_disable(i2c->clk);
+ 
+ 	return 0;
+@@ -1585,13 +1850,31 @@
+ {
+ 	struct pxa_i2c *i2c = dev_get_drvdata(dev);
+ 
+-	clk_enable(i2c->clk);
++	int ret=clk_enable(i2c->clk);
++	if(ret)return ret;
+ 	i2c_pxa_reset(i2c);
++	if(!i2c->goya_bridge_held)goya_bus_restore(i2c);
++ else dev_info(dev,"T110_BRIDGE_PM: noirq keeps unpowered bridge disconnected\n");
+ 
+ 	return 0;
+ }
+ 
++static int i2c_pxa_suspend_late(struct device *dev)
++{
++ struct pxa_i2c *i2c=dev_get_drvdata(dev);
++ if(i2c->goya_mfp&&!i2c->goya_bridge_held)i2c_mark_adapter_suspended(&i2c->adap);
++ return 0;
++}
++static int i2c_pxa_resume_early(struct device *dev)
++{
++ struct pxa_i2c *i2c=dev_get_drvdata(dev);
++ int ret=goya_bridge_resume_early(i2c);if(ret)return ret;
++ if(i2c->goya_mfp)i2c_mark_adapter_resumed(&i2c->adap);
++ return 0;
++}
+ static const struct dev_pm_ops i2c_pxa_dev_pm_ops = {
++ .suspend_late=i2c_pxa_suspend_late,
++ .resume_early=i2c_pxa_resume_early,
+ 	.suspend_noirq = i2c_pxa_suspend_noirq,
+ 	.resume_noirq = i2c_pxa_resume_noirq,
+ };
+diff --git a/drivers/input/touchscreen/zinitix.c b/drivers/input/touchscreen/zinitix.c
+--- a/drivers/input/touchscreen/zinitix.c
++++ b/drivers/input/touchscreen/zinitix.c
+@@ -1,3 +1,4 @@
++#include <linux/t110-board.h>
+ // SPDX-License-Identifier: GPL-2.0-only
+ 
+ #include <linux/delay.h>
+@@ -11,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/property.h>
++#include <linux/platform_data/i2c-pxa.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
+ 
+@@ -161,12 +163,32 @@
+ 	u32 keycodes[MAX_SUPPORTED_BUTTON_NUM];
+ 	int num_keycodes;
+ 	bool have_versioninfo;
++	bool keep_powered_initialized;
++ bool sleeping;
++ unsigned int sleep_tests;
+ 	u16 chip_revision;
+ 	u16 firmware_version;
+ 	u16 regdata_version;
+ 	u16 icon_status_reg;
+ };
+ 
++/* The vendor BT532 driver retries NACKed transactions eight times with
++ * 1ms spacing while reset/calibration completes. Keep this board-local.
++ */
++static int zinitix_i2c_send(struct i2c_client *client, const u8 *data, int len)
++{
++	int ret, attempt, tries = of_machine_is_compatible("samsung,goyawifi") ? 8 : 1;
++
++	for (attempt = 0; attempt < tries; attempt++) {
++		ret = i2c_master_send(client, data, len);
++		if (ret != -EREMOTEIO && ret != -EAGAIN && ret != -ECONNREFUSED)
++			return ret;
++		if (attempt + 1 < tries)
++			usleep_range(1000, 1500);
++	}
++	return ret;
++}
++
+ static int zinitix_read_data(struct i2c_client *client,
+ 			     u16 reg, void *values, size_t length)
+ {
+@@ -174,14 +196,17 @@
+ 	int ret;
+ 
+ 	/* A single i2c_transfer() transaction does not work here. */
+-	ret = i2c_master_send(client, (u8 *)&reg_le, sizeof(reg_le));
++	ret = zinitix_i2c_send(client, (u8 *)&reg_le, sizeof(reg_le));
+ 	if (ret != sizeof(reg_le))
+ 		return ret < 0 ? ret : -EIO;
+ 
++	/* BT532 register select settling time from the vendor protocol. */
++	udelay(50);
+ 	ret = i2c_master_recv(client, (u8 *)values, length);
+ 	if (ret != length)
+ 		return ret < 0 ? ret : -EIO;
+ 
++	udelay(10);
+ 	return 0;
+ }
+ 
+@@ -190,10 +215,11 @@
+ 	__le16 packet[2] = {cpu_to_le16(reg), cpu_to_le16(value)};
+ 	int ret;
+ 
+-	ret = i2c_master_send(client, (u8 *)packet, sizeof(packet));
++	ret = zinitix_i2c_send(client, (u8 *)packet, sizeof(packet));
+ 	if (ret != sizeof(packet))
+ 		return ret < 0 ? ret : -EIO;
+ 
++	udelay(10);
+ 	return 0;
+ }
+ 
+@@ -202,10 +228,11 @@
+ 	__le16 reg_le = cpu_to_le16(reg);
+ 	int ret;
+ 
+-	ret = i2c_master_send(client, (u8 *)&reg_le, sizeof(reg_le));
++	ret = zinitix_i2c_send(client, (u8 *)&reg_le, sizeof(reg_le));
+ 	if (ret != sizeof(reg_le))
+ 		return ret < 0 ? ret : -EIO;
+ 
++	udelay(10);
+ 	return 0;
+ }
+ 
+@@ -234,6 +261,12 @@
+ 		dev_err(&client->dev, "Failed to write reset command\n");
+ 		return error;
+ 	}
++
++	/* BT532 soft-reset settling: cached version info must not remove the
++	 * startup interval on subsequent opens. Vendor writes retry at 1ms.
++	 */
++	if (of_machine_is_compatible("samsung,goyawifi"))
++		msleep(CHIP_ON_DELAY);
+ 
+ 	/*
+ 	 * Read and cache the chip revision and firmware version the first time
+@@ -248,7 +281,7 @@
+ 						ZINITIX_DATA_VERSION_REG);
+ 		bt541->have_versioninfo = true;
+ 
+-		dev_dbg(&client->dev,
++		dev_info(&client->dev,
+ 			"chip revision %04x firmware version %04x regdata version %04x\n",
+ 			bt541->chip_revision, bt541->firmware_version,
+ 			bt541->regdata_version);
+@@ -313,6 +346,13 @@
+ 				  bt541->zinitix_mode);
+ 	if (error)
+ 		return error;
++
++	/* Mode 0 requires volatile soft calibration to start normal scanning. */
++	if (bt541->zinitix_mode == 0) {
++		error = zinitix_write_cmd(client, ZINITIX_CALIBRATE_CMD);
++		if (error)
++			return error;
++	}
+ 
+ 	int_flags = BIT_PT_CNT_CHANGE | BIT_DOWN | BIT_MOVE | BIT_UP;
+ 	if (bt541->num_keycodes)
+@@ -405,7 +445,7 @@
+ {
+ 	u16 x, y;
+ 
+-	if (unlikely(!(p->sub_status &
++	if (bt541->zinitix_mode != 0 && unlikely(!(p->sub_status &
+ 		       (SUB_BIT_UP | SUB_BIT_DOWN | SUB_BIT_MOVE)))) {
+ 		dev_dbg(&bt541->client->dev, "unknown finger event %#02x\n",
+ 			p->sub_status);
+@@ -414,6 +454,8 @@
+ 
+ 	x = le16_to_cpu(p->x);
+ 	y = le16_to_cpu(p->y);
++	if (x > bt541->prop.max_x || y > bt541->prop.max_y)
++		return;
+ 
+ 	input_mt_slot(bt541->input_dev, slot);
+ 	if (input_mt_report_slot_state(bt541->input_dev, MT_TOOL_FINGER,
+@@ -452,8 +494,21 @@
+ 
+ 	memset(&touch_event, 0, sizeof(struct touch_event));
+ 
+-	error = zinitix_read_data(bt541->client, ZINITIX_POINT_STATUS_REG,
+-				  &touch_event, sizeof(struct touch_event));
++	/* Mode 0 carries six bytes per contact and a count, not a mask. */
++	if (bt541->zinitix_mode == 0) {
++		u8 raw[4 + 6 * MAX_SUPPORTED_FINGER_NUM];
++
++		error = zinitix_read_data(bt541->client, ZINITIX_POINT_STATUS_REG,
++					  raw, sizeof(raw));
++		if (!error) {
++			memcpy(&touch_event, raw, 4);
++			for (i = 0; i < MAX_SUPPORTED_FINGER_NUM; i++)
++				memcpy(&touch_event.point_coord[i], raw + 4 + i * 6, 6);
++		}
++	} else {
++		error = zinitix_read_data(bt541->client, ZINITIX_POINT_STATUS_REG,
++					  &touch_event, sizeof(struct touch_event));
++	}
+ 	if (error) {
+ 		dev_err(&client->dev, "Failed to read in touchpoint struct\n");
+ 		goto out;
+@@ -470,7 +525,17 @@
+ 		zinitix_report_keys(bt541, le16_to_cpu(icon_events));
+ 	}
+ 
+-	finger_mask = touch_event.finger_mask;
++	if (bt541->zinitix_mode == 0) {
++		u16 status = le16_to_cpu(touch_event.status);
++
++		/* Periodic/invalid reports do not contain a contact snapshot. */
++		if (!status || (status & BIT_ERROR))
++			goto out;
++		finger_mask = status & BIT_PT_EXIST ?
++			GENMASK(MAX_SUPPORTED_FINGER_NUM - 1, 0) : 0;
++	} else {
++		finger_mask = touch_event.finger_mask;
++	}
+ 	for_each_set_bit(i, &finger_mask, MAX_SUPPORTED_FINGER_NUM) {
+ 		const struct point_coord *p = &touch_event.point_coord[i];
+ 
+@@ -501,23 +566,43 @@
+ 
+ 	msleep(CHIP_ON_DELAY);
+ 
+-	error = zinitix_send_power_on_sequence(bt541);
++	/* Goyawifi keeps both rails alive across input close. Reopening an
++	 * already running BT532 must use the volatile reset/configuration path,
++	 * not restart its NVM loader. Other boards retain their power sequence.
++	 */
++	if (!bt541->keep_powered_initialized) {
++		error = zinitix_send_power_on_sequence(bt541);
++		if (!error && of_machine_is_compatible("samsung,goyawifi"))
++			bt541->keep_powered_initialized = true;
++	} else {
++		error = 0;
++	}
+ 	if (error) {
+ 		dev_err(&bt541->client->dev,
+ 			"Error while sending power-on sequence: %d\n", error);
+-		return error;
+-	}
+-
++		goto disable_supplies;
++	}
++
++ if(bt541->sleeping) {
++  error=zinitix_write_cmd(bt541->client,ZINITIX_WAKEUP_CMD);
++  if(error)goto disable_supplies;
++  msleep(20);
++ }
+ 	error = zinitix_init_touch(bt541);
+ 	if (error) {
+ 		dev_err(&bt541->client->dev,
+ 			"Error while configuring touch IC\n");
+-		return error;
+-	}
+-
++		goto disable_supplies;
++	}
++
++	bt541->sleeping=false;
+ 	enable_irq(bt541->client->irq);
+ 
+ 	return 0;
++
++disable_supplies:
++	regulator_bulk_disable(ARRAY_SIZE(bt541->supplies), bt541->supplies);
++	return error;
+ }
+ 
+ static int zinitix_stop(struct bt541_ts_data *bt541)
+@@ -525,6 +610,18 @@
+ 	int error;
+ 
+ 	disable_irq(bt541->client->irq);
++ if(of_machine_is_compatible("samsung,goyawifi")) {
++  error=zinitix_write_u16(bt541->client,ZINITIX_INT_ENABLE_FLAG,0);
++  if(!error)error=zinitix_write_cmd(bt541->client,ZINITIX_IDLE_CMD);
++  if(error){enable_irq(bt541->client->irq);return error;}
++  msleep(20);bt541->sleeping=true;
++  for(int slot=0;slot<MAX_SUPPORTED_FINGER_NUM;slot++) {
++   input_mt_slot(bt541->input_dev,slot);
++   input_mt_report_slot_state(bt541->input_dev,MT_TOOL_FINGER,false);
++  }
++  for(int i=0;i<bt541->num_keycodes;i++)input_report_key(bt541->input_dev,bt541->keycodes[i],0);
++  input_mt_sync_frame(bt541->input_dev);input_sync(bt541->input_dev);
++ }
+ 
+ 	error = regulator_bulk_disable(ARRAY_SIZE(bt541->supplies),
+ 				       bt541->supplies);
+@@ -536,6 +633,23 @@
+ 
+ 	return 0;
+ }
++
++int zinitix_goya_bridge_bootstrap(struct i2c_client *client,
++                                int (*action)(void *),void *data)
++{
++ struct bt541_ts_data *bt541;bool enabled;int ret,wake;
++ if(!of_machine_is_compatible("samsung,goyawifi") || client->addr!=0x20 ||
++    client->adapter->nr!=1)return -ENODEV;
++ bt541=i2c_get_clientdata(client);
++ if(!client->dev.driver || !bt541 || !bt541->input_dev)return -EPROBE_DEFER;
++ guard(mutex)(&bt541->input_dev->mutex);
++ enabled=input_device_enabled(bt541->input_dev);
++ if(enabled){ret=zinitix_stop(bt541);if(ret)return ret;}
++ ret=i2c_pxa_goya_bridge_bootstrap(client->adapter,action,data);
++ if(enabled){wake=zinitix_start(bt541);if(wake)return wake;}
++ return ret;
++}
++EXPORT_SYMBOL_GPL(zinitix_goya_bridge_bootstrap);
+ 
+ static int zinitix_input_open(struct input_dev *dev)
+ {
+@@ -610,6 +724,35 @@
+ 
+ 	return 0;
+ }
++
++
++#if IS_REACHABLE(CONFIG_I2C_PXA)
++static ssize_t sleep_test_store(struct device *dev,struct device_attribute *attr,const char *buf,size_t count)
++{
++ struct bt541_ts_data *bt541=dev_get_drvdata(dev);unsigned int seconds;int ret,wake;
++ if(!of_machine_is_compatible("samsung,goyawifi"))return -EOPNOTSUPP;
++ if(kstrtouint(buf,0,&seconds)||seconds<1||seconds>5)return -EINVAL;
++ guard(mutex)(&bt541->input_dev->mutex);
++ if(!input_device_enabled(bt541->input_dev))return -EBUSY;
++ ret=zinitix_stop(bt541);if(ret)return ret;
++ ret=i2c_pxa_goya_sleep_test(bt541->client->adapter,seconds);
++ wake=zinitix_start(bt541);if(wake)return wake;
++ if(ret)return ret;
++ bt541->sleep_tests++;
++ dev_info(dev,"GOYA touch/bus sleep test %u passed; scanning restored\n",bt541->sleep_tests);
++ return count;
++}
++static ssize_t sleep_state_show(struct device *dev,struct device_attribute *attr,char *buf)
++{
++ struct bt541_ts_data *bt541=dev_get_drvdata(dev);
++ guard(mutex)(&bt541->input_dev->mutex);
++ return sysfs_emit(buf,"sleeping=%u tests=%u enabled=%u\n",bt541->sleeping,bt541->sleep_tests,input_device_enabled(bt541->input_dev));
++}
++static DEVICE_ATTR_WO(sleep_test);
++static DEVICE_ATTR_RO(sleep_state);
++static struct attribute *goya_sleep_attrs[]={&dev_attr_sleep_test.attr,&dev_attr_sleep_state.attr,NULL};
++static const struct attribute_group goya_sleep_group={.attrs=goya_sleep_attrs};
++#endif
+ 
+ static int zinitix_ts_probe(struct i2c_client *client)
+ {
+@@ -684,17 +827,23 @@
+ 		bt541->zinitix_mode = DEFAULT_TOUCH_POINT_MODE;
+ 	}
+ 
+-	if (bt541->zinitix_mode != 2) {
++	if (bt541->zinitix_mode != 0 && bt541->zinitix_mode != 2) {
+ 		/*
+ 		 * If there are devices that don't support mode 2, support
+-		 * for other modes (0, 1) will be needed.
++		 * for mode 1 will be needed.
+ 		 */
+ 		dev_err(&client->dev,
+-			"Malformed zinitix,mode property, must be 2 (supplied: %d)\n",
++			"Malformed zinitix,mode property, must be 0 or 2 (supplied: %d)\n",
+ 			bt541->zinitix_mode);
+ 		return -EINVAL;
+ 	}
+ 
++#if IS_REACHABLE(CONFIG_I2C_PXA)
++ if(of_machine_is_compatible("samsung,goyawifi")) {
++  error=devm_device_add_group(&client->dev,&goya_sleep_group);
++  if(error)return error;
++ }
++#endif
+ 	return 0;
+ }
+ 
+@@ -706,7 +855,7 @@
+ 	guard(mutex)(&bt541->input_dev->mutex);
+ 
+ 	if (input_device_enabled(bt541->input_dev))
+-		zinitix_stop(bt541);
++		return zinitix_stop(bt541);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -1203,3 +1203,7 @@
+ 	  Say Y or M here if you have an Apple Silicon based Mac.
+ 
+ endif # POWER_SUPPLY
++
++config T110_CHARGER
++	tristate "SM-T110 SMB328 charging policy"
++	depends on I2C && OF && T110_MONITOR
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -135,3 +135,5 @@
+ obj-$(CONFIG_FUEL_GAUGE_MM8013)	+= mm8013.o
+ obj-$(CONFIG_MACSMC_POWER)	+= macsmc-power.o
+ obj-$(CONFIG_CHARGER_MAX77759)	+= max77759_charger.o
++
++obj-$(CONFIG_T110_CHARGER) += t110-smb328.o
+diff --git a/drivers/power/supply/t110-ocv.h b/drivers/power/supply/t110-ocv.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/t110-ocv.h
+@@ -0,0 +1,2 @@
++/* GOYA vendor OCV curve, mV; voltage-only estimate, not coulomb counting. */
++static const int t110_ocv[]={3373,3474,3545,3598,3640,3670,3683,3688,3690,3692,3694,3696,3701,3708,3715,3719,3724,3729,3734,3738,3742,3745,3748,3751,3755,3759,3763,3767,3771,3774,3778,3782,3785,3788,3791,3794,3797,3800,3803,3806,3809,3813,3816,3820,3824,3828,3832,3836,3840,3845,3850,3854,3860,3865,3871,3877,3883,3890,3898,3906,3916,3926,3937,3948,3958,3967,3976,3984,3993,4001,4010,4018,4027,4037,4047,4056,4066,4075,4084,4094,4104,4114,4125,4135,4145,4156,4167,4177,4188,4199,4210,4221,4233,4244,4256,4267,4279,4291,4303,4316,4320};
+diff --git a/drivers/power/supply/t110-smb328.c b/drivers/power/supply/t110-smb328.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/t110-smb328.c
+@@ -0,0 +1,249 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Board-scoped SM-T110 SMB328 control, from pinned Samsung vendor programming.
++ * RT8973 is read-only here: do not change its USB routing/interrupts.
++ * The PM822 measures voltage/temperature, not battery current/coulombs.
++ */
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/mutex.h>
++#include <linux/power_supply.h>
++#include <linux/workqueue.h>
++#include <linux/jiffies.h>
++struct t110_charger {
++ struct i2c_client *client,*muic;
++ struct power_supply *battery,*psy;
++ struct mutex lock;
++ struct delayed_work poll;
++ bool online,hot,cold,inhibit,limit_hold,expired,charge_on,configured;
++ int status,health,usb_type,input_ua,fast_ua,temp,voltage,capacity,limit;
++ int command,stat_c,fault,source,last_error,watchdog_recoveries;
++ unsigned long session_start;
++};
++static int rd(struct i2c_client *c,u8 reg)
++{ return i2c_smbus_read_byte_data(c,reg); }
++static int wr(struct t110_charger *c,u8 reg,u8 value)
++{
++ int ret=i2c_smbus_write_byte_data(c->client,reg,value),r;
++ if(ret<0)return ret;
++ r=rd(c->client,reg);
++ return r<0?r:(r==value?0:-EIO);
++}
++/* Called under lock. Disable first; close configuration write gate last. */
++static int configure(struct t110_charger *c,bool dedicated)
++{
++ int ret,cmd=rd(c->client,0x31),v;
++ if(cmd<0)return cmd;
++ cmd=(cmd|0x90)&~0x0c; /* writable, disabled, no boost request */
++ ret=wr(c,0x31,cmd);if(ret)return ret;
++ ret=wr(c,5,0);if(ret)goto close; /* command controls charge enable */
++ ret=wr(c,4,0x6e);if(ret)goto close; /* vendor polled/IRQ-disabled setup */
++ ret=wr(c,3,0xda);if(ret)goto close; /* vendor function control A */
++ v=rd(c->client,2);if(v<0){ret=v;goto close;}
++ ret=wr(c,2,(v&~0x7e)|(43<<1));if(ret)goto close; /* 4320mV <= vendor 4330mV */
++ v=rd(c->client,0);if(v<0){ret=v;goto close;}
++ /* USB: lowest 450mA setting; DCP: 1000mA, below vendor1550mA. Term200mA. */
++ ret=wr(c,0,(v&0x18)|(dedicated?0xa0:0)|7);if(ret)goto close;
++ v=rd(c->client,1);if(v<0){ret=v;goto close;}
++ ret=wr(c,1,(v&0x18)|(dedicated?0xa0:0));if(ret)goto close; /* AICL on,4.25V */
++ v=rd(c->client,7);if(v<0){ret=v;goto close;}
++ ret=wr(c,7,(v&0x1f)|0xe0);if(ret)goto close;
++ v=rd(c->client,6);if(v<0){ret=v;goto close;}
++ ret=wr(c,6,v&~0x20);if(ret)goto close; /* never source VBUS */
++ cmd|=dedicated?0x0c:0x08; /* AC mode only on positively identified DCP */
++close:
++ {
++  int r=wr(c,0x31,cmd&~0x80);
++  if(!ret)ret=r;
++ }
++ c->charge_on=false;
++ if(!ret){c->configured=true;c->input_ua=dedicated?1000000:500000;c->fast_ua=dedicated?1000000:450000;}
++ return ret;
++}
++static int enable(struct t110_charger *c,bool on)
++{
++ int cmd=rd(c->client,0x31),ret;
++ if(cmd<0)return cmd;
++ cmd&=~0x80;
++ if(on)cmd&=~0x10;else cmd|=0x10;
++ ret=wr(c,0x31,cmd);
++ if(!ret){c->charge_on=on;c->command=cmd;}
++ return ret;
++}
++static int battery_value(struct t110_charger *c,enum power_supply_property p,int *out)
++{
++ union power_supply_propval v;int ret=power_supply_get_property(c->battery,p,&v);
++ if(!ret)*out=v.intval;
++ return ret;
++}
++static void update(struct t110_charger *c)
++{
++ union power_supply_propval v;
++ struct power_supply *usb=power_supply_get_by_name("t110-usb");
++ bool online,dcp,on;int ret,src,stat,fault,voltage,temp;
++ if(!usb){ret=-ENODEV;goto fail;}
++ ret=power_supply_get_property(usb,POWER_SUPPLY_PROP_ONLINE,&v);
++ power_supply_put(usb);if(ret)goto fail;
++ online=!!v.intval;
++ ret=battery_value(c,POWER_SUPPLY_PROP_TEMP,&temp);if(ret)goto fail;
++ ret=battery_value(c,POWER_SUPPLY_PROP_VOLTAGE_AVG,&voltage);if(ret)goto fail;
++ src=rd(c->muic,0x0a);if(src<0){ret=src;goto fail;}
++ /* Strict single DCP flag; unknown/CDP/SDP all get USB500mA ceiling. */
++ dcp=online&&src==0x40;
++ if(online&&!c->online){
++  c->session_start=jiffies;c->expired=false;
++  ret=enable(c,false);if(ret)goto fail;
++  /* Discard the previous cable session's latched input/watchdog IRQs. */
++  ret=i2c_smbus_write_byte_data(c->client,0x30,0xff);if(ret<0)goto fail;
++  c->configured=false;
++ }
++ if(!online){c->expired=false;c->session_start=0;}
++ c->online=online;c->source=src;c->temp=temp;c->voltage=voltage;
++ ret=battery_value(c,POWER_SUPPLY_PROP_CAPACITY,&c->capacity);if(ret)goto fail;
++ c->usb_type=dcp?POWER_SUPPLY_USB_TYPE_DCP:
++  (src==4?POWER_SUPPLY_USB_TYPE_SDP:(src==0x20?POWER_SUPPLY_USB_TYPE_CDP:POWER_SUPPLY_USB_TYPE_UNKNOWN));
++ if(!c->configured||c->input_ua!=(dcp?1000000:500000)) {
++  ret=configure(c,dcp);if(ret)goto fail;
++ }
++ if(temp>=450)c->hot=true;else if(temp<=420)c->hot=false;
++ if(temp<=0)c->cold=true;else if(temp>=30)c->cold=false;
++ if(online&&time_after(jiffies,c->session_start+6*60*60*HZ))c->expired=true;
++ if(c->limit<100&&c->capacity>=c->limit)c->limit_hold=true;
++ if(c->limit==100||c->capacity<=c->limit-5)c->limit_hold=false;
++ fault=rd(c->client,0x37);if(fault<0){ret=fault;goto fail;}
++ /* Samsung's SMB328 watchdog recovery: stop, acknowledge IRQ, reapply
++  * the bounded profile. This does not restart our six-hour session timer. */
++ if(online&&(fault&0x80)) {
++  ret=enable(c,false);if(ret)goto fail;
++  ret=i2c_smbus_write_byte_data(c->client,0x30,0xff);if(ret<0)goto fail;
++  ret=configure(c,dcp);if(ret)goto fail;
++  c->watchdog_recoveries++;
++  fault=rd(c->client,0x37);if(fault<0){ret=fault;goto fail;}
++ }
++ c->fault=fault;
++ c->health=c->hot?POWER_SUPPLY_HEALTH_OVERHEAT:
++  c->cold?POWER_SUPPLY_HEALTH_COLD:
++  (online&&(fault&6))?POWER_SUPPLY_HEALTH_UNSPEC_FAILURE:
++  c->expired?POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE:
++  (online&&(fault&0x80))?POWER_SUPPLY_HEALTH_WATCHDOG_TIMER_EXPIRE:POWER_SUPPLY_HEALTH_GOOD;
++ on=online&&!c->inhibit&&!c->limit_hold&&c->health==POWER_SUPPLY_HEALTH_GOOD&&voltage<4400000;
++ ret=enable(c,on);if(ret)goto fail;
++ stat=rd(c->client,0x36);if(stat<0){ret=stat;goto fail;}
++ c->stat_c=stat;
++ c->status=!online?POWER_SUPPLY_STATUS_DISCHARGING:
++  !on?POWER_SUPPLY_STATUS_NOT_CHARGING:
++  (stat&0xc0)?POWER_SUPPLY_STATUS_FULL:
++  ((stat&1)&&!(stat&0x30)&&(stat&6))?POWER_SUPPLY_STATUS_CHARGING:POWER_SUPPLY_STATUS_NOT_CHARGING;
++ if(voltage>=4400000)c->health=POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++ c->last_error=0;return;
++fail:
++ enable(c,false);c->configured=false;c->last_error=ret;
++ c->status=POWER_SUPPLY_STATUS_UNKNOWN;c->health=POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++}
++static void poll(struct work_struct *work)
++{
++ struct t110_charger *c=container_of(to_delayed_work(work),struct t110_charger,poll);
++ int status,health,cap,source;
++ mutex_lock(&c->lock);
++ status=c->status;health=c->health;cap=c->capacity;source=c->source;
++ update(c);
++ if(status!=c->status||health!=c->health||cap!=c->capacity||source!=c->source) {
++  power_supply_changed(c->psy);power_supply_changed(c->battery);
++ }
++ mutex_unlock(&c->lock);
++ schedule_delayed_work(&c->poll,2*HZ);
++}
++static enum power_supply_property props[]={POWER_SUPPLY_PROP_ONLINE,POWER_SUPPLY_PROP_USB_TYPE,
++ POWER_SUPPLY_PROP_STATUS,POWER_SUPPLY_PROP_HEALTH,POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++ POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++ POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR};
++static int get(struct power_supply *psy,enum power_supply_property p,union power_supply_propval *v)
++{
++ struct t110_charger *c=power_supply_get_drvdata(psy);int ret=0;
++ mutex_lock(&c->lock);
++ switch(p) {
++ case POWER_SUPPLY_PROP_ONLINE:v->intval=c->online;break;
++ case POWER_SUPPLY_PROP_USB_TYPE:v->intval=c->usb_type;break;
++ case POWER_SUPPLY_PROP_STATUS:v->intval=c->status;break;
++ case POWER_SUPPLY_PROP_HEALTH:v->intval=c->health;break;
++ case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:v->intval=c->input_ua;break;
++ case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:v->intval=c->fast_ua;break;
++ case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:v->intval=4320000;break;
++ case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:v->intval=c->inhibit?POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;break;
++ default:ret=-EINVAL;
++ }
++ mutex_unlock(&c->lock);return ret;
++}
++static int set(struct power_supply *psy,enum power_supply_property p,const union power_supply_propval *v)
++{
++ struct t110_charger *c=power_supply_get_drvdata(psy);
++ if(p!=POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR)return -EINVAL;
++ if(v->intval!=POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO&&v->intval!=POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)return -EINVAL;
++ mutex_lock(&c->lock);c->inhibit=v->intval==POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++ update(c);mutex_unlock(&c->lock);power_supply_changed(psy);return c->last_error;
++}
++static int writable(struct power_supply *psy,enum power_supply_property p)
++{ return p==POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR; }
++static ssize_t state_show(struct device *dev,struct device_attribute *a,char *buf)
++{
++ struct t110_charger *c=dev_get_drvdata(dev);int n;
++ mutex_lock(&c->lock);
++ n=sysfs_emit(buf,"online=%d source=%02x command=%02x status_c=%02x fault=%02x enabled=%d temp_deciC=%d voltage_uV=%d estimated_percent=%d limit=%d limit_hold=%d hot=%d cold=%d timeout=%d error=%d watchdog_recoveries=%d\n",
++ c->online,c->source,c->command,c->stat_c,c->fault,c->charge_on,c->temp,c->voltage,c->capacity,c->limit,c->limit_hold,c->hot,c->cold,c->expired,c->last_error,c->watchdog_recoveries);
++ mutex_unlock(&c->lock);return n;
++}
++static DEVICE_ATTR_RO(state);
++static ssize_t charge_limit_show(struct device *dev,struct device_attribute *a,char *buf)
++{ struct t110_charger *c=dev_get_drvdata(dev);return sysfs_emit(buf,"%d\n",c->limit); }
++static ssize_t charge_limit_store(struct device *dev,struct device_attribute *a,const char *buf,size_t count)
++{
++ struct t110_charger *c=dev_get_drvdata(dev);int limit,ret=kstrtoint(buf,10,&limit);
++ if(ret)return ret;
++ if(limit<50||limit>100)return -EINVAL;
++ mutex_lock(&c->lock);c->limit=limit;update(c);ret=c->last_error;mutex_unlock(&c->lock);
++ power_supply_changed(c->psy);return ret?ret:count;
++}
++static DEVICE_ATTR_RW(charge_limit);
++static struct attribute *charger_attrs[]={&dev_attr_state.attr,&dev_attr_charge_limit.attr,NULL};
++static const struct attribute_group charger_group={.attrs=charger_attrs};
++static const struct power_supply_desc desc={.name="t110-charger",.type=POWER_SUPPLY_TYPE_USB,
++ .properties=props,.num_properties=ARRAY_SIZE(props),.get_property=get,.set_property=set,
++ .property_is_writeable=writable,.usb_types=BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN)|BIT(POWER_SUPPLY_USB_TYPE_SDP)|BIT(POWER_SUPPLY_USB_TYPE_CDP)|BIT(POWER_SUPPLY_USB_TYPE_DCP),
++ .charge_behaviours=BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO)|BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)};
++static void put_battery(void *data){power_supply_put(data);}
++static void unregister_muic(void *data){i2c_unregister_device(data);}
++static void stop(void *data)
++{
++ struct t110_charger *c=data;cancel_delayed_work_sync(&c->poll);
++ mutex_lock(&c->lock);enable(c,false);mutex_unlock(&c->lock);
++}
++static int probe(struct i2c_client *client)
++{
++ struct t110_charger *c;struct i2c_adapter *bus;struct power_supply_config cfg={};int ret,id;
++ if(!of_machine_is_compatible("samsung,goyawifi"))return -ENODEV;
++ c=devm_kzalloc(&client->dev,sizeof(*c),GFP_KERNEL);if(!c)return -ENOMEM;
++ c->client=client;c->limit=100;mutex_init(&c->lock);INIT_DELAYED_WORK(&c->poll,poll);
++ c->battery=power_supply_get_by_name("t110-battery");if(!c->battery)return -EPROBE_DEFER;
++ ret=devm_add_action_or_reset(&client->dev,put_battery,c->battery);if(ret)return ret;
++ bus=i2c_get_adapter(7);if(!bus)return -EPROBE_DEFER;
++ c->muic=i2c_new_dummy_device(bus,0x14);i2c_put_adapter(bus);
++ if(IS_ERR(c->muic))return PTR_ERR(c->muic);
++ ret=devm_add_action_or_reset(&client->dev,unregister_muic,c->muic);if(ret)return ret;
++ id=rd(c->muic,1);if(id!=0x0a)return dev_err_probe(&client->dev,id<0?id:-ENODEV,"Expected board RT8973 ID0a\n");
++ i2c_set_clientdata(client,c);cfg.drv_data=c;
++ c->psy=devm_power_supply_register(&client->dev,&desc,&cfg);if(IS_ERR(c->psy))return PTR_ERR(c->psy);
++ ret=devm_add_action_or_reset(&client->dev,stop,c);if(ret)return ret;
++ ret=devm_device_add_group(&client->dev,&charger_group);if(ret)return ret;
++ schedule_delayed_work(&c->poll,0);
++ dev_info(&client->dev,"SM-T110 SMB328 + read-only RT8973; USB500/DCP1000mA; float4320mV; thermal0..45C\n");
++ return 0;
++}
++static void shutdown(struct i2c_client *client){stop(i2c_get_clientdata(client));}
++static const struct i2c_device_id ids[]={{"t110-smb328"},{}};
++MODULE_DEVICE_TABLE(i2c,ids);
++static const struct of_device_id match[]={{.compatible="samsung,t110-smb328"},{}};
++MODULE_DEVICE_TABLE(of,match);
++static struct i2c_driver charger_driver={.probe=probe,.shutdown=shutdown,.id_table=ids,
++ .driver={.name="t110-smb328",.of_match_table=match}};
++module_i2c_driver(charger_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("SM-T110 SMB328 charging and battery policy");
+diff --git a/include/linux/platform_data/i2c-pxa.h b/include/linux/platform_data/i2c-pxa.h
+--- a/include/linux/platform_data/i2c-pxa.h
++++ b/include/linux/platform_data/i2c-pxa.h
+@@ -15,4 +15,6 @@
+ 	unsigned char		master_code;
+ 	unsigned long		rate;
+ };
++struct i2c_adapter;
++int i2c_pxa_goya_sleep_test(struct i2c_adapter *adap,unsigned int seconds);
+ #endif

@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.patch text eol=lf -whitespace
+*.sh text eol=lf
+*.py text eol=lf
+# Preserve upstream licensing documents verbatim, including trailing blanks.
+LICENSES/** -whitespace
+Documentation/process/license-rules.rst -whitespace

@@ -1,0 +1,8 @@
+  0: Speaker
+    Built-in speaker
+  1: Headphones
+    Wired headphones
+  2: Mic
+    Built-in microphone
+  3: HeadsetMic
+    Wired headset microphone (manual selection)
