@@ -6,7 +6,7 @@ Experimental Linux port for **SM-T110 / samsung-goyawifi / Marvell PXA986 A0**. 
 
 ## Build
 
-On Linux, install Git, Python **3.12+**, LLVM/Clang and LLD, make, a C compiler, flex, bison, bc, OpenSSL/ELF development headers, zstd, dtc and **pahole 1.26+**. The standalone build was tested with LLVM 18 and pahole 1.32. Check `pahole --version`; older distro packages may be insufficient. Provide `llvm-objcopy`, `llvm-strip` and the other LLVM tools on PATH.
+On Linux, install Git, patch, Python **3.12+**, LLVM/Clang and LLD, make, a C compiler, flex, bison, bc, OpenSSL/ELF development headers, zstd, dtc and **pahole 1.26+**. The standalone build was tested with LLVM 18 and pahole 1.32. Check `pahole --version`; older distro packages may be insufficient. Provide `llvm-objcopy`, `llvm-strip` and the other LLVM tools on PATH.
 
 ```sh
 python3 prepare-source.py

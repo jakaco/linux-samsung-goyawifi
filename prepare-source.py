@@ -34,8 +34,12 @@ def main():
   if not name.strip() or name.startswith('#'):continue
   patch=(repo/'patches'/name).resolve()
   if patch.parent!=repo/'patches':p.error('Invalid patch path')
-  subprocess.run(['git','apply','--check',str(patch)],cwd=tree,check=True)
-  subprocess.run(['git','apply',str(patch)],cwd=tree,check=True)
+  # git apply discovers the enclosing port repository when the default output
+  # is under this checkout, then silently skips paths outside its prefix.
+  # patch always interprets paths relative to this prepared kernel tree.
+  command=['patch','--batch','--forward','--fuzz=0','-p1','-i',str(patch)]
+  subprocess.run(command+['--dry-run'],cwd=tree,check=True,stdout=subprocess.DEVNULL)
+  subprocess.run(command,cwd=tree,check=True,stdout=subprocess.DEVNULL)
  for relative,expected in manifest['portable_source_sha256'].items():
   source=(tree/relative).resolve()
   if not source.is_relative_to(tree) or sha256(source)!=expected:raise RuntimeError('Source mismatch: '+relative)
