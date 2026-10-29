@@ -17,5 +17,5 @@ jobs:
         run: python3 test-image-layout.py
       - name: Python and shell syntax
         run: |
-          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py
+          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py tests/radio-stress.py
           sh -n build-kernel.sh

@@ -26,6 +26,8 @@ USB networking uses the normal initramfs configfs gadget. The accompanying gener
 
 **Known blockers:** intermittent shared Wi-Fi/Bluetooth firmware/bus stalls; normal distro suspend not reliable; DDR self-refresh unproven; shared-I2C stall root cause unresolved; GPS and video decoding lack complete generic kernel/media-stack integration. Proprietary firmware and the previous custom userspace decoders are not included. Stock mpv will not automatically gain hardware decoding.
 
+The [radio investigation and reproducible stress test](docs/RADIO.md) records controlled results and rejected candidates. A successful short ping is not treated as a reliability fix.
+
 Phosh/Phoc uses hardware GLES2 composition, but modern GTK4 applications need Cairo rendering because their GL path requires GLES3. Unlock, typing, touch, brightness and screen blank/wake were owner-tested; Phosh remains sluggish. Weston is a lighter alternative. Screen blanking is not evidence of system suspend.
 
 ## Distribution integration and recovery
