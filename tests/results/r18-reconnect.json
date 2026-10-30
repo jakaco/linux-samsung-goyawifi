@@ -1,0 +1,37 @@
+{
+  "cycles": [
+    {
+      "cycle": 1,
+      "seconds": 3.79,
+      "bluetooth_power_cycle": true,
+      "wifi_reconnected": true,
+      "gateway_no_loss": true
+    },
+    {
+      "cycle": 2,
+      "seconds": 3.88,
+      "bluetooth_power_cycle": true,
+      "wifi_reconnected": true,
+      "gateway_no_loss": true
+    },
+    {
+      "cycle": 3,
+      "seconds": 4.02,
+      "bluetooth_power_cycle": true,
+      "wifi_reconnected": true,
+      "gateway_no_loss": true
+    }
+  ],
+  "failure_counts": {
+    "Timeout cmd id": 0,
+    "host_to_card failed": 0,
+    "unknown upload type": 0,
+    "invalid packet,": 0,
+    "card_to_host_mpa failed": 0,
+    "card 0001 removed": 0,
+    "no free cmd node": 0,
+    "Opcode": 0
+  },
+  "taint": "0",
+  "pass": true
+}

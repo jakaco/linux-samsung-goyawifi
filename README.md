@@ -14,7 +14,7 @@ sh build-kernel.sh "$PWD/kernel-work/linux-f909e534f5e34feb2ea2701d54df63e21aa50
   "$PWD/build-goyawifi" "$PWD/stage-goyawifi"
 ```
 
-The preparer checks the upstream archive SHA256, applies four patches, and verifies all **73** exported source files against the tested tree. It refuses to overwrite an existing source tree. Use `--archive PATH` to reuse a download or `--output DIRECTORY` for another clean preparation.
+The preparer checks the upstream archive SHA256, applies four patches, and verifies all **76** exported source files against the tested tree. It refuses to overwrite an existing source tree. Use `--archive PATH` to reuse a download or `--output DIRECTORY` for another clean preparation.
 
 The build stages a normal zImage, DTB, config and modules. It does **not** flash a device. The tested base is Linux commit `f909e534f5e34feb2ea2701d54df63e21aa506fc` (7.3-rc7), recorded in `source-manifest.json`. Never mix modules from builds that only happen to share the same release string.
 
@@ -32,14 +32,14 @@ Phosh/Phoc uses hardware GLES2 composition, but modern GTK4 applications need Ca
 
 ## Distribution integration and recovery
 
-See [postmarketOS integration](docs/POSTMARKETOS.md) for APK recipes, Phosh configuration and the initramfs patch. The pinned pmaports snapshot identifies its rootfs as Nura edge; this is not an official downloadable SM-T110 Phosh release. Latest local recipe revisions are kernel `7.3_rc7-r10`, device `5-r6`, and generic initramfs `3.12.5-r2`.
+See [postmarketOS integration](docs/POSTMARKETOS.md) for APK recipes, Phosh configuration and the initramfs patch. The pinned pmaports snapshot identifies its rootfs as Nura edge; this is not an official downloadable SM-T110 Phosh release. Latest local recipe revisions are kernel `7.3_rc7-r18`, device `5-r6`, and generic initramfs `3.12.5-r2`.
 
 Samsung's loader needs the supplied board packer/FDT initramfs handoff. A generic Android header-only packer is insufficient. KERNEL is **16 MiB**; split large distribution initramfs contents rather than enlarging the image. Read [boot and recovery](docs/RECOVERY.md) before writing anything. There are no universal private rootfs images, credentials, per-device radio addresses or signing keys here.
 
 ## Validation and contributions
 
-The kernel and device APKs were built in an isolated official pmbootstrap workflow. The installed r10 kernel booted; normal APK triggers generated and wrote its boot image, and every generated image byte was read back from KERNEL. Recovery remained unchanged. The separate standalone build passed earlier. Two ARM32 BPF arena `resolve_btfids` warnings remain; BPF arena support is not claimed.
+The kernel and device APKs were built in an isolated official pmbootstrap workflow. The installed r18 kernel booted; normal APK triggers generated and wrote its boot image, and every generated image byte was read back from KERNEL. Recovery remained unchanged. The separate standalone build passed earlier. Two ARM32 BPF arena `resolve_btfids` warnings remain; BPF arena support is not claimed.
 
-CI checks source preparation and the boot-image layout tests; it does not boot hardware. Local metadata records source/package hashes. Package maintainer fields are intentionally unset until a real maintainer provides their identity. Nothing has been submitted to Linux or postmarketOS upstream. Contributions should include logs with personal identifiers removed, exact build versions and repeatable hardware tests.
+CI checks source preparation, boot-image layout, and actual A-MSDU/RX descriptor contracts; it does not boot hardware. Local metadata records source/package hashes. Package maintainer fields are intentionally unset until a real maintainer provides their identity. Nothing has been submitted to Linux or postmarketOS upstream. Contributions should include logs with personal identifiers removed, exact build versions and repeatable hardware tests.
 
 Kernel patches retain their original license notices, principally GPL-2.0; see [licensing and sources](NOTICE.md). Board image tooling is MIT. Firmware is separate and its redistribution status is not asserted here.

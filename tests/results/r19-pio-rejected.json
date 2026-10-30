@@ -1,0 +1,37 @@
+{
+  "kernel": "7.3.0-rc7-goyawifi",
+  "bytes_per_direction_per_round": 16777216,
+  "scan_seconds": 60,
+  "scan_transport": "auto",
+  "rounds": [],
+  "kernel_build": "#20-samsung-goyawifi SMP Fri Oct 30 11:37:37 UTC 2026",
+  "bluetooth_auto_sleep": "1",
+  "firmware": "version string: w8777-A0, RF878X, FP66, 14.66.33.p63, BT_SDIO",
+  "taint_before": "0",
+  "paired_peer_payload_bytes": 44,
+  "failure": {
+    "stage": "upload",
+    "type": "EOFError"
+  },
+  "paired_peer_echo": {
+    "sent": null,
+    "received": null,
+    "exit_status": 1,
+    "pass": false,
+    "diagnostic": "Recv failed: Connection aborted"
+  },
+  "log_contiguous": true,
+  "taint_after": "0",
+  "kernel_failure_counts": {
+    "Timeout cmd id": 1,
+    "host_to_card failed": 0,
+    "write CFG reg failed": 18,
+    "unknown upload type": 0,
+    "invalid packet,": 0,
+    "card_to_host_mpa failed": 0,
+    "card 0001 removed": 1,
+    "no free cmd node": 0,
+    "Opcode": 3
+  },
+  "pass": false
+}

@@ -17,9 +17,38 @@ An earlier p46 reconnect/discovery attempt also failed; that test overlapped IP 
 
 The boot log also captured an unrecognised upload type followed by repeated block-ack requests, command-node exhaustion and a timeout. The SDHCI error counters remained zero in the sampled failures. This narrows the investigation but does not by itself prove an RF, firmware or protocol root cause.
 
-An SD8777-only candidate matching the vendor Bluetooth byte-status/ack interrupt path was tested in kernel recipe r11. It did not fix the problem and is being reverted; it is not part of the published stable patch set. That trace caught a timeout on `STA_CONFIGURE` (0x23f), a channel query which this firmware normally rejects with result 2. The next candidate avoids issuing that unsupported query and retains the existing HT20 fallback. It is not declared validated until its hardware tests pass.
+## Changes through kernel recipe r18
 
-The existing port already has a chip-scoped legacy TxPD/alignment workaround corresponding to the [SD8777 timeout RFC](https://lists.openwall.net/linux-kernel/2025/10/26/357). Applying that workaround again is not a new fix. The vendor interrupt comparison used [Samsung/Marvell bt_sdiommc.c](https://github.com/T110-pmOS/linux_kernel_pxa988/blob/fb2f8b6cd86864c0fcac790e97a372b1772003c7/drivers/marvell/sd8787/mbtc_src/bt/bt_sdiommc.c); the exact fetched source was checked locally before the experiment.
+The current patch retains chip-specific corrections rather than a startup repair service:
+
+* Use the legacy 16-byte TxPD in ordinary, null and A-MSDU packets, including WMM next-packet length calculations. The earlier workaround missed the aggregate constructor.
+* Do not read modern RxPD flags from SD8777's 16-byte descriptor: that byte belongs to the packet payload on this chip.
+* Keep normal Bluetooth firmware auto-sleep enabled; forcing it awake performed worse in the controlled discovery comparison.
+* Avoid unsupported WLAN `STA_CONFIGURE` (0x23f), retaining the existing HT20 fallback, and use legacy scanning as in the vendor driver.
+* Conservatively disable multi-port SDIO TX/RX batching only for SD8777. The chip ID is checked directly because interface initialization precedes adapter registration. Other cards retain batching.
+
+The host regression test compiles the actual A-MSDU constructor, descriptor structures and inline helpers. It checks both legacy and other-chip firmware bytes and RX payload preservation. The historical constructor fails the legacy layout check. This establishes a real format bug, not that it caused every observed firmware stall. A sampled reconnect run recorded no A-MSDU constructor calls; hardware execution of that specific path has not been established.
+
+### Hardware observations
+
+All results are from one tablet. Firmware remained 14.66.33.p63, normal DDR scaling was restored, and no private radio daemon was installed.
+
+| Candidate | Result |
+| --- | --- |
+| r11/r14 vendor-style BT interrupt experiment | Firmware timeouts persisted; experiment reverted |
+| r13 normal BT auto-sleep | Discovery/bulk test passed, but paired-phone coexistence still caused WLAN/HCI timeouts |
+| r15 legacy scan | Paired-phone coexistence still failed |
+| r16 complete TxPD handling | 96 MiB discovery traffic passed; third reconnect timed out and corrupt SDIO headers appeared |
+| r18 RX flags + single-port transport | 96 MiB with discovery and another 96 MiB without discovery passed Wi-Fi checksums with no new firmware/HCI timeouts during those intervals; three BT power/WLAN reconnect cycles passed |
+| r19 radio-host-only PIO diagnostic | Corrected coexistence test failed during its first upload with firmware/HCI timeouts and SDIO busy errors; rejected and r18 restored |
+
+**r18 is not a complete reliability fix.** Its first boot reported an invalid SDIO packet and card resets; the next boot timed out on RSSI (0xa4), then recovered. Early 512-byte echo results were confounded: btmon showed Linux sending signaling-MTU rejects even while l2ping received replies. The corrected test uses 44 payload bytes plus the 4-byte signaling header, fitting the minimum 48-byte signaling MTU. It still triggered real HCI/WLAN timeouts and a card reset during discovery, although all 96 MiB of Wi-Fi traffic eventually passed. The failing sanitized report is in [tests/results](../tests/results). Connection/discovery success is not evidence of working audio profiles or sustained Bluetooth data.
+
+Established-connection comparisons used one pinned access point. Automatic AP selection was restored afterward; those comparisons do not validate roaming or every AP. Multi-port counters stayed zero during r18 traffic, confirming the transport change took effect. Its separate contribution is not isolated from the RX fix, and no throughput improvement is claimed.
+
+The PIO comparison used the same AP and firmware, with eMMC and microSD still on ADMA. The radio platform device's runtime power control was `on` and status `active`. Failure with radio DMA disabled rules out disabling DMA as a sufficient fix; it does not establish the underlying cause. The PIO host-driver change is not included in this patch set. The r18 desktop, brightness, touch and screen blank/wake passed an owner check before that diagnostic.
+
+The existing legacy format work corresponds to the [SD8777 timeout RFC](https://lists.openwall.net/linux-kernel/2025/10/26/357). Vendor comparisons used [Samsung/Marvell's pinned tree](https://github.com/T110-pmOS/linux_kernel_pxa988/tree/fb2f8b6cd86864c0fcac790e97a372b1772003c7/drivers/marvell/sd8787), including WLAN firmware structures/defaults and `mbtc_src/bt/bt_sdiommc.c`. The vendor sources were checked locally. Reapplying the original partial TxPD workaround is not a new fix.
 
 ## Reproduce without publishing private logs
 
@@ -34,4 +63,4 @@ python3 tests/radio-stress.py \
 
 Run an idle comparison with `--scan-seconds 0`; `--scan-transport bredr` and `le` can isolate discovery modes. The default is three rounds of 16 MiB each direction, checked by SHA256. BlueZ discovery and each transfer pair are bounded. A failure returns a nonzero exit status. Do not run this through Wi-Fi as the only control channel.
 
-The report contains timing, checksums, kernel version, taint and counts of failure signatures. It does not include addresses, credentials, neighbour discoveries or raw dmesg. It is an optional development test, not a tablet startup service. It stops discovery when done, including on a handled test failure. It does not prove paired-device transfers, audio profiles, suspend, all access points or long-duration stability.
+The report contains timing, checksums, kernel version, taint and counts of failure signatures. It does not include addresses, credentials, neighbour discoveries or raw dmesg. It is an optional development test, not a tablet startup service. It stops discovery when done, including on a handled test failure. Use `--peer MAC` only for your explicitly selected, already-paired device: it adds a short availability check and a bounded 60-echo, 44-byte L2CAP test. Missing echo summaries are failures, not zero-packet successes. The peer address is not written to the report. It does not prove Bluetooth profiles, suspend, all access points or long-duration stability.

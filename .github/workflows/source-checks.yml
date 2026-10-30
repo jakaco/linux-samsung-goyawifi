@@ -10,12 +10,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler patch
+      - run: sudo apt-get update && sudo apt-get install -y device-tree-compiler patch gcc libc6-dev
       - name: Verify pinned source and patches
         run: python3 prepare-source.py
       - name: Exercise actual boot packer layout
         run: python3 test-image-layout.py
+      - name: Check actual A-MSDU firmware descriptor bytes
+        run: python3 tests/test-txpd-layout.py --source kernel-work/linux-f909e534f5e34feb2ea2701d54df63e21aa506fc
       - name: Python and shell syntax
         run: |
-          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py tests/radio-stress.py
+          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py tests/radio-stress.py tests/test-txpd-layout.py
           sh -n build-kernel.sh

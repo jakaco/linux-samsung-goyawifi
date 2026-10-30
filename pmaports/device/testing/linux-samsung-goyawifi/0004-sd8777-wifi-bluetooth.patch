@@ -3,17 +3,16 @@ Subject: [PATCH 4/4] SM-T110 local port: sd8777-wifi-bluetooth
 diff --git a/drivers/bluetooth/btmrvl_main.c b/drivers/bluetooth/btmrvl_main.c
 --- a/drivers/bluetooth/btmrvl_main.c
 +++ b/drivers/bluetooth/btmrvl_main.c
-@@ -6,6 +6,9 @@
+@@ -6,6 +6,8 @@
   **/
  
  #include <linux/module.h>
 +#include <linux/etherdevice.h>
 +#include <linux/hex.h>
-+#include <linux/mmc/sdio_ids.h>
  #include <linux/of.h>
  #include <linux/string_choices.h>
  #include <net/bluetooth/bluetooth.h>
-@@ -16,6 +19,15 @@
+@@ -16,6 +18,15 @@
  #include "btmrvl_sdio.h"
  
  #define VERSION "1.0"
@@ -29,17 +28,15 @@ diff --git a/drivers/bluetooth/btmrvl_main.c b/drivers/bluetooth/btmrvl_main.c
  
  /*
   * This function is called by interface specific interrupt handler.
-@@ -557,11 +569,29 @@
+@@ -557,11 +568,28 @@
  
  	btmrvl_pscan_window_reporting(priv, 0x01);
  
--	priv->btmrvl_dev.psmode = 1;
-+	/* SD8777 shares card sleep with WLAN. Keep autonomous BT sleep disabled
-+	 * until its interaction with cfg80211 interface-down is validated.
++	/* Keep the normal firmware auto-sleep policy. Forcing SD8777 awake
++	 * degraded simultaneous discovery/WLAN traffic. System host sleep is
++	 * separately controlled by the shared-card suspend callbacks.
 +	 */
-+	priv->btmrvl_dev.psmode =
-+		((struct btmrvl_sdio_card *)priv->btmrvl_dev.card)->func->device !=
-+		SDIO_DEVICE_ID_MARVELL_8777_BT;
+ 	priv->btmrvl_dev.psmode = 1;
  	btmrvl_enable_ps(priv);
  
  	btmrvl_send_hscfg_cmd(priv);
@@ -218,10 +215,82 @@ diff --git a/drivers/bluetooth/btmrvl_sdio.c b/drivers/bluetooth/btmrvl_sdio.c
  MODULE_FIRMWARE("mrvl/sdsd8997_combo_v4.bin");
 +
 +MODULE_FIRMWARE("mrvl/sd8777_uapsta.bin");
+diff --git a/drivers/net/wireless/marvell/mwifiex/11n_aggr.c b/drivers/net/wireless/marvell/mwifiex/11n_aggr.c
+--- a/drivers/net/wireless/marvell/mwifiex/11n_aggr.c
++++ b/drivers/net/wireless/marvell/mwifiex/11n_aggr.c
+@@ -89,11 +89,12 @@
+ {
+ 	struct txpd *local_tx_pd;
+ 	struct mwifiex_txinfo *tx_info = MWIFIEX_SKB_TXCB(skb);
+-
+-	skb_push(skb, sizeof(*local_tx_pd));
++	u16 pd_len = mwifiex_txpd_len(priv->adapter);
++
++	skb_push(skb, pd_len);
+ 
+ 	local_tx_pd = (struct txpd *) skb->data;
+-	memset(local_tx_pd, 0, sizeof(struct txpd));
++	memset(local_tx_pd, 0, pd_len);
+ 
+ 	/* Original priority has been overwritten */
+ 	local_tx_pd->priority = (u8) skb->priority;
+@@ -102,10 +103,10 @@
+ 	local_tx_pd->bss_num = priv->bss_num;
+ 	local_tx_pd->bss_type = priv->bss_type;
+ 	/* Always zero as the data is followed by struct txpd */
+-	local_tx_pd->tx_pkt_offset = cpu_to_le16(sizeof(struct txpd));
++	local_tx_pd->tx_pkt_offset = cpu_to_le16(pd_len);
+ 	local_tx_pd->tx_pkt_type = cpu_to_le16(PKT_TYPE_AMSDU);
+ 	local_tx_pd->tx_pkt_length = cpu_to_le16(skb->len -
+-						 sizeof(*local_tx_pd));
++						 pd_len);
+ 
+ 	if (tx_info->flags & MWIFIEX_BUF_FLAG_TDLS_PKT)
+ 		local_tx_pd->flags |= MWIFIEX_TXPD_FLAGS_TDLS_PACKET;
+@@ -147,6 +148,7 @@
+ 			  __releases(&priv->wmm.ra_list_spinlock)
+ {
+ 	struct mwifiex_adapter *adapter = priv->adapter;
++	u16 pd_len = mwifiex_txpd_len(adapter);
+ 	struct sk_buff *skb_aggr, *skb_src;
+ 	struct mwifiex_txinfo *tx_info_aggr, *tx_info_src;
+ 	int pad = 0, aggr_num = 0, ret;
+@@ -171,7 +173,7 @@
+ 	/* skb_aggr->data already 64 byte align, just reserve bus interface
+ 	 * header and txpd.
+ 	 */
+-	skb_reserve(skb_aggr, headroom + sizeof(struct txpd));
++	skb_reserve(skb_aggr, headroom + pd_len);
+ 	tx_info_aggr =  MWIFIEX_SKB_TXCB(skb_aggr);
+ 
+ 	memset(tx_info_aggr, 0, sizeof(*tx_info_aggr));
+@@ -236,7 +238,7 @@
+ 	}
+ 
+ 	if (skb_src)
+-		tx_param.next_pkt_len = skb_src->len + sizeof(struct txpd);
++		tx_param.next_pkt_len = skb_src->len + pd_len;
+ 	else
+ 		tx_param.next_pkt_len = 0;
+ 
 diff --git a/drivers/net/wireless/marvell/mwifiex/cfg80211.c b/drivers/net/wireless/marvell/mwifiex/cfg80211.c
 --- a/drivers/net/wireless/marvell/mwifiex/cfg80211.c
 +++ b/drivers/net/wireless/marvell/mwifiex/cfg80211.c
-@@ -260,7 +260,8 @@
+@@ -88,6 +88,13 @@
+ {
+ 	struct mwifiex_channel_band channel_band;
+ 	int ret;
++
++	/* SD8777 firmware rejects STA_CONFIGURE (0x23f), and can stop
++	 * responding to it during shared-radio traffic. Preserve the existing
++	 * HT20 error fallback without issuing an unsupported firmware command.
++	 */
++	if (priv->adapter->sd8777_legacy_txpd)
++		return NL80211_CHAN_HT20;
+ 
+ 	ret = mwifiex_get_chan_info(priv, &channel_band);
+ 
+@@ -260,7 +267,8 @@
  
  	mwifiex_form_mgmt_frame(skb, buf, len);
  
@@ -256,10 +325,34 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/main.h b/drivers/net/wireless/
  	u8 iface_type;
  	unsigned int debug_mask;
  	struct mwifiex_iface_comb iface_limit;
+@@ -1040,6 +1042,23 @@
+ 	bool ignore_btcoex_events;
+ };
+ 
++/* The SD8777 firmware wire descriptor predates the TX-status extension.
++ * Keep every ordinary, null and aggregated TX path on the same wire size.
++ */
++static inline u16 mwifiex_txpd_len(const struct mwifiex_adapter *adapter)
++{
++	return sizeof(struct txpd) - (adapter->sd8777_legacy_txpd ? 4 : 0);
++}
++
++/* SD8777 has a 16-byte RxPD, without the later trailing flags byte.
++ * Never interpret an Ethernet payload byte as TDLS metadata.
++ */
++static inline u8 mwifiex_rxpd_flags(const struct mwifiex_adapter *adapter,
++				  const struct rxpd *pd)
++{
++	return adapter->sd8777_legacy_txpd ? 0 : pd->flags;
++}
++
+ void mwifiex_process_tx_queue(struct mwifiex_adapter *adapter);
+ 
+ int mwifiex_init_lock_list(struct mwifiex_adapter *adapter);
 diff --git a/drivers/net/wireless/marvell/mwifiex/sdio.c b/drivers/net/wireless/marvell/mwifiex/sdio.c
 --- a/drivers/net/wireless/marvell/mwifiex/sdio.c
 +++ b/drivers/net/wireless/marvell/mwifiex/sdio.c
-@@ -335,6 +335,23 @@
+@@ -335,6 +335,26 @@
  	.host_mlme = false,
  };
  
@@ -275,7 +368,10 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sdio.c b/drivers/net/wireless/
 +	.has_control_mask = true,
 +	.can_dump_fw = false,
 +	.can_auto_tdls = false,
-+	.can_ext_scan = true,
++	/* Use the legacy scan protocol used by the SM-T110 vendor driver.
++	 * Extended scan (0x107) timed out during simultaneous BT discovery.
++	 */
++	.can_ext_scan = false,
 +	.fw_ready_extra_delay = false,
 +	.host_mlme = false,
 +};
@@ -283,7 +379,7 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sdio.c b/drivers/net/wireless/
  static const struct mwifiex_sdio_device mwifiex_sdio_sd8787 = {
  	.firmware = SD8787_DEFAULT_FW_NAME,
  	.reg = &mwifiex_reg_sd87xx,
-@@ -516,6 +533,7 @@
+@@ -516,6 +536,7 @@
  };
  
  static const struct of_device_id mwifiex_sdio_of_match_table[] __maybe_unused = {
@@ -291,40 +387,100 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sdio.c b/drivers/net/wireless/
  	{ .compatible = "marvell,sd8787" },
  	{ .compatible = "marvell,sd8897" },
  	{ .compatible = "marvell,sd8978" },
-@@ -954,6 +972,8 @@
+@@ -954,6 +975,8 @@
  
  /* WLAN IDs */
  static const struct sdio_device_id mwifiex_ids[] = {
-+	{ SDIO_DEVICE(SDIO_VENDOR_ID_MARVELL, 0x9131),
++	{ SDIO_DEVICE(SDIO_VENDOR_ID_MARVELL, SDIO_DEVICE_ID_MARVELL_8777_WLAN),
 +	  .driver_data = (unsigned long) &mwifiex_sdio_sd8777 },
  	{SDIO_DEVICE(SDIO_VENDOR_ID_MARVELL, SDIO_DEVICE_ID_MARVELL_8786_WLAN),
  		.driver_data = (unsigned long) &mwifiex_sdio_sd8786},
  	{SDIO_DEVICE(SDIO_VENDOR_ID_MARVELL, SDIO_DEVICE_ID_MARVELL_8787_WLAN),
-@@ -2489,6 +2509,7 @@
+@@ -2489,6 +2512,7 @@
  
  	/* save adapter pointer in card */
  	card->adapter = adapter;
-+	adapter->sd8777_legacy_txpd = card->func->device == 0x9131;
++	adapter->sd8777_legacy_txpd = card->func->device == SDIO_DEVICE_ID_MARVELL_8777_WLAN;
  	adapter->tx_buf_size = card->tx_buf_size;
  
  	sdio_claim_host(func);
-@@ -3155,6 +3176,7 @@
+@@ -2571,14 +2595,18 @@
+ 	card->mpa_tx.pkt_cnt = 0;
+ 	card->mpa_tx.start_port = 0;
+ 
+-	card->mpa_tx.enabled = 1;
++	/* SD8777 produced corrupt RX headers and firmware stalls with the
++	 * current multi-port transport. Keep this legacy card on single-port
++	 * transfers until its MP-A protocol is validated.
++	 */
++	card->mpa_tx.enabled = card->func->device != SDIO_DEVICE_ID_MARVELL_8777_WLAN;
+ 	card->mpa_tx.pkt_aggr_limit = card->mp_agg_pkt_limit;
+ 
+ 	card->mpa_rx.buf_len = 0;
+ 	card->mpa_rx.pkt_cnt = 0;
+ 	card->mpa_rx.start_port = 0;
+ 
+-	card->mpa_rx.enabled = 1;
++	card->mpa_rx.enabled = card->func->device != SDIO_DEVICE_ID_MARVELL_8777_WLAN;
+ 	card->mpa_rx.pkt_aggr_limit = card->mp_agg_pkt_limit;
+ 
+ 	/* Allocate buffers for SDIO MP-A */
+@@ -3155,6 +3183,7 @@
  	/* tx_buf_size might be changed to 3584 by firmware during
  	 * data transfer, we will reset to default size.
  	 */
-+	adapter->sd8777_legacy_txpd = card->func->device == 0x9131;
++	adapter->sd8777_legacy_txpd = card->func->device == SDIO_DEVICE_ID_MARVELL_8777_WLAN;
  	adapter->tx_buf_size = card->tx_buf_size;
  
  	/* Read the host_int_status_reg for ACK the first interrupt got
+diff --git a/drivers/net/wireless/marvell/mwifiex/sta_rx.c b/drivers/net/wireless/marvell/mwifiex/sta_rx.c
+--- a/drivers/net/wireless/marvell/mwifiex/sta_rx.c
++++ b/drivers/net/wireless/marvell/mwifiex/sta_rx.c
+@@ -194,6 +194,7 @@
+ 	struct rxpd *local_rx_pd;
+ 	struct rx_packet_hdr *rx_pkt_hdr;
+ 	u8 ta[ETH_ALEN];
++	u8 rx_flags;
+ 	u16 rx_pkt_type, rx_pkt_offset, rx_pkt_length, seq_num;
+ 	struct mwifiex_sta_node *sta_ptr;
+ 
+@@ -223,13 +224,15 @@
+ 		return ret;
+ 	}
+ 
++	rx_flags = mwifiex_rxpd_flags(adapter, local_rx_pd);
++
+ 	/*
+ 	 * If the packet is not an unicast packet then send the packet
+ 	 * directly to os. Don't pass thru rx reordering
+ 	 */
+ 	if ((!IS_11N_ENABLED(priv) &&
+ 	     !(ISSUPP_TDLS_ENABLED(priv->adapter->fw_cap_info) &&
+-	       !(local_rx_pd->flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET))) ||
++	       !(rx_flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET))) ||
+ 	    !ether_addr_equal_unaligned(priv->curr_addr, rx_pkt_hdr->eth803_hdr.h_dest)) {
+ 		mwifiex_process_rx_packet(priv, skb);
+ 		return ret;
+@@ -237,9 +240,9 @@
+ 
+ 	if (mwifiex_queuing_ra_based(priv) ||
+ 	    (ISSUPP_TDLS_ENABLED(priv->adapter->fw_cap_info) &&
+-	     local_rx_pd->flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET)) {
++	     rx_flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET)) {
+ 		memcpy(ta, rx_pkt_hdr->eth803_hdr.h_source, ETH_ALEN);
+-		if (local_rx_pd->flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET &&
++		if (rx_flags & MWIFIEX_RXPD_FLAGS_TDLS_PACKET &&
+ 		    local_rx_pd->priority < MAX_NUM_TID) {
+ 			sta_ptr = mwifiex_get_sta_entry(priv, ta);
+ 			if (sta_ptr)
 diff --git a/drivers/net/wireless/marvell/mwifiex/sta_tx.c b/drivers/net/wireless/marvell/mwifiex/sta_tx.c
 --- a/drivers/net/wireless/marvell/mwifiex/sta_tx.c
 +++ b/drivers/net/wireless/marvell/mwifiex/sta_tx.c
-@@ -36,20 +36,24 @@
+@@ -36,20 +36,23 @@
  	struct txpd *local_tx_pd;
  	struct mwifiex_txinfo *tx_info = MWIFIEX_SKB_TXCB(skb);
  	unsigned int pad;
-+	unsigned int pd_len = sizeof(struct txpd) -
-+		(adapter->sd8777_legacy_txpd ? 4 : 0);
++	unsigned int pd_len = mwifiex_txpd_len(adapter);
  	u16 pkt_type, pkt_length, pkt_offset;
  	int hroom = adapter->intf_hdr_len;
  
@@ -348,7 +504,7 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sta_tx.c b/drivers/net/wireles
  	if (pkt_type == PKT_TYPE_MGMT)
  		pkt_length -= MWIFIEX_MGMT_FRAME_HEADER_SIZE;
  	local_tx_pd->tx_pkt_length = cpu_to_le16(pkt_length);
-@@ -58,8 +62,9 @@
+@@ -58,8 +61,9 @@
  	local_tx_pd->pkt_delay_2ms =
  				mwifiex_wmm_compute_drv_pkt_delay(priv, skb);
  
@@ -360,7 +516,7 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sta_tx.c b/drivers/net/wireles
  		local_tx_pd->tx_token_id = tx_info->ack_frame_id;
  		local_tx_pd->flags |= MWIFIEX_TXPD_FLAGS_REQ_TX_STATUS;
  	}
-@@ -86,7 +91,7 @@
+@@ -86,7 +90,7 @@
  		local_tx_pd->flags |= MWIFIEX_TXPD_FLAGS_TDLS_PACKET;
  
  	/* Offset of actual data */
@@ -369,15 +525,15 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sta_tx.c b/drivers/net/wireles
  	if (pkt_type == PKT_TYPE_MGMT) {
  		/* Set the packet type and add header for management frame */
  		local_tx_pd->tx_pkt_type = cpu_to_le16(pkt_type);
-@@ -117,6 +122,7 @@
+@@ -117,6 +121,7 @@
  /* sizeof(struct txpd) + Interface specific header */
  #define NULL_PACKET_HDR 64
  	u32 data_len = NULL_PACKET_HDR;
-+	u32 pd_len = sizeof(struct txpd) - (adapter->sd8777_legacy_txpd ? 4 : 0);
++	u32 pd_len = mwifiex_txpd_len(adapter);
  	struct sk_buff *skb;
  	int ret;
  	struct mwifiex_txinfo *tx_info = NULL;
-@@ -143,15 +149,17 @@
+@@ -143,15 +148,17 @@
  	tx_info->bss_num = priv->bss_num;
  	tx_info->bss_type = priv->bss_type;
  	tx_info->pkt_len = data_len -
@@ -399,13 +555,35 @@ diff --git a/drivers/net/wireless/marvell/mwifiex/sta_tx.c b/drivers/net/wireles
  	local_tx_pd->bss_num = priv->bss_num;
  	local_tx_pd->bss_type = priv->bss_type;
  
+diff --git a/drivers/net/wireless/marvell/mwifiex/wmm.c b/drivers/net/wireless/marvell/mwifiex/wmm.c
+--- a/drivers/net/wireless/marvell/mwifiex/wmm.c
++++ b/drivers/net/wireless/marvell/mwifiex/wmm.c
+@@ -1257,7 +1257,7 @@
+ 	spin_unlock_bh(&priv->wmm.ra_list_spinlock);
+ 
+ 	tx_param.next_pkt_len = ((skb_next) ? skb_next->len +
+-				sizeof(struct txpd) : 0);
++				mwifiex_txpd_len(adapter) : 0);
+ 
+ 	if (mwifiex_process_tx(priv, skb, &tx_param) == -EBUSY) {
+ 		/* Queue the packet back at the head */
+@@ -1346,7 +1346,7 @@
+ 
+ 	tx_param.next_pkt_len =
+ 		((skb_next) ? skb_next->len +
+-		 sizeof(struct txpd) : 0);
++		 mwifiex_txpd_len(adapter) : 0);
+ 	if (adapter->iface_type == MWIFIEX_USB) {
+ 		ret = adapter->if_ops.host_to_card(adapter, priv->usb_port,
+ 						   skb, &tx_param);
 diff --git a/include/linux/mmc/sdio_ids.h b/include/linux/mmc/sdio_ids.h
 --- a/include/linux/mmc/sdio_ids.h
 +++ b/include/linux/mmc/sdio_ids.h
-@@ -87,6 +87,7 @@
+@@ -87,6 +87,8 @@
  #define SDIO_DEVICE_ID_MARVELL_8688_WLAN	0x9104
  #define SDIO_DEVICE_ID_MARVELL_8688_BT		0x9105
  #define SDIO_DEVICE_ID_MARVELL_8786_WLAN	0x9116
++#define SDIO_DEVICE_ID_MARVELL_8777_WLAN		0x9131
 +#define SDIO_DEVICE_ID_MARVELL_8777_BT		0x9132
  #define SDIO_DEVICE_ID_MARVELL_8787_WLAN	0x9119
  #define SDIO_DEVICE_ID_MARVELL_8787_BT		0x911a

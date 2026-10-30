@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Check Wi-Fi transfers while BlueZ discovery runs, using USB as control."""
-import argparse,hashlib,json,socket,threading,time
+import argparse,hashlib,json,re,socket,threading,time
 from pathlib import Path
 import paramiko
 
@@ -16,9 +16,11 @@ p.add_argument('--rounds',type=int,default=3)
 p.add_argument('--mib',type=int,default=16)
 p.add_argument('--scan-seconds',type=int,default=60,help='0 disables discovery; Bluetooth remains powered')
 p.add_argument('--scan-transport',choices=['auto','bredr','le'],default='auto')
+p.add_argument('--peer',help='Optional already-paired, explicitly selected Bluetooth peer for 60 44-byte L2CAP echoes')
 p.add_argument('--output',required=True,type=Path)
 a=p.parse_args()
 assert 1<=a.rounds<=20 and 1<=a.mib<=64 and 0<=a.scan_seconds<=120
+if a.peer and not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}',a.peer):p.error('Invalid Bluetooth peer address')
 
 def connect(address):
  c=paramiko.SSHClient();c.load_host_keys(str(a.known_hosts))
@@ -36,10 +38,23 @@ def command(c,text):
 control=connect(a.usb_host)
 size=a.mib*1024*1024;payload=bytes(range(256))*(size//256)
 report={'kernel':command(control,'uname -r').strip(),'bytes_per_direction_per_round':size,'scan_seconds':a.scan_seconds,'scan_transport':a.scan_transport,'rounds':[]}
+report['kernel_build']=command(control,'uname -v').strip()
+report['bluetooth_auto_sleep']=command(control,'cat /sys/kernel/debug/bluetooth/hci*/status/curpsmode 2>/dev/null || true').strip()
+report['firmware']=command(control,'cat /sys/kernel/debug/mwifiex/*/verext 2>/dev/null || true').strip()
 report['taint_before']=command(control,'cat /proc/sys/kernel/tainted').strip()
 before=command(control,'dmesg')
-data=None;timer=None;stage='start'
+data=None;timer=None;stage='start';peer=None
 try:
+ if a.peer:
+  stage='paired peer sanity'
+  # 44 payload bytes + 4 signaling-header bytes fit the minimum 48-byte
+  # signaling MTU. Larger raw echoes can elicit kernel Command Rejects even
+  # when l2ping receives a valid response; do not confuse that with RF loss.
+  sanity=command(control,'timeout 10 /usr/sbin/l2ping -v -c 1 -s 44 -t 2 '+a.peer)
+  if '1 sent, 1 received' not in sanity:raise RuntimeError('Peer echo unavailable')
+  time.sleep(2)
+  peer=control.exec_command('timeout 120 /usr/sbin/l2ping -v -c 60 -s 44 -t 2 '+a.peer,timeout=130)
+  report['paired_peer_payload_bytes']=44
  if a.scan_seconds:
   mode='on' if a.scan_transport=='auto' else a.scan_transport
   # Keep these channel objects alive. BlueZ itself bounds discovery if the
@@ -67,11 +82,20 @@ finally:
  if timer:timer.cancel()
  if data:data.close()
  command(control,'bluetoothctl scan off >/dev/null 2>&1 || true')
+ if peer:
+  result=peer[1].read().decode(errors='replace');rc=peer[1].channel.recv_exit_status()
+  errors=peer[2].read().decode(errors='replace')
+  summary=re.search(r'(\d+) sent, (\d+) received',result)
+  report['paired_peer_echo']={'sent':int(summary[1]) if summary else None,'received':int(summary[2]) if summary else None,'exit_status':rc,'pass':bool(summary and rc==0 and summary[1]==summary[2] and int(summary[1])==60)}
+  if errors:
+   errors=re.sub(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}','<peer>',errors)
+   errors=re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b','<address>',errors)
+   report['paired_peer_echo']['diagnostic']=errors.strip()[:200]
  after=command(control,'dmesg');new=after[len(before):] if after.startswith(before) else after
  report['log_contiguous']=after.startswith(before)
  report['taint_after']=command(control,'cat /proc/sys/kernel/tainted').strip()
- signatures=['Timeout cmd id','host_to_card failed','write CFG reg failed','unknown upload type','card 0001 removed','no free cmd node','Opcode']
+ signatures=['Timeout cmd id','host_to_card failed','write CFG reg failed','unknown upload type','invalid packet,','card_to_host_mpa failed','card 0001 removed','no free cmd node','Opcode']
  report['kernel_failure_counts']={key:sum(key in line for line in new.splitlines()) for key in signatures}
- report['pass']=len(report['rounds'])==a.rounds and report['taint_after']=='0' and report['log_contiguous'] and not any(report['kernel_failure_counts'].values())
+ report['pass']=len(report['rounds'])==a.rounds and report['taint_after']=='0' and report['log_contiguous'] and not any(report['kernel_failure_counts'].values()) and (not peer or report['paired_peer_echo']['pass'])
  a.output.write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2));control.close()
 raise SystemExit(0 if report['pass'] else 1)

@@ -16,7 +16,7 @@ These are development results on one SM-T110. Earlier Alpine-specific tests and 
 | Sound | ALSA/UCM, speaker, headphones, built-in/headset microphones; earlier full duplex tests | Current generic PulseAudio playback/capture passed; headset/full-duplex server path needs revalidation |
 | Accelerometer | IIO, iio-sensor-proxy; tilt/orientation tested | Native landscape is currently locked in Phosh |
 | Wi-Fi | mwifiex SD8777, NetworkManager, association and downloads tested | Intermittent CMD53/firmware stalls; not production reliable |
-| Bluetooth | btmrvl/BlueZ; automatic HCI discovery and per-device address setup | Earlier pairing/OBEX worked; current coexistence and host sleep remain unreliable |
+| Bluetooth | btmrvl/BlueZ; automatic HCI discovery and per-device address setup | Current stock BlueZ pairing and short echoes passed; correctly sized coexistence test still triggered firmware/HCI timeouts; host sleep remains unreliable |
 | Camera | Standard V4L2 rear-camera capture | Stock camera GUI and performance require further testing |
 | GPS | Earlier proprietary userspace could receive satellites | No complete generic GNSS implementation or reliable-fix claim |
 | Video decoding | Earlier proprietary engine/custom adapter played multiple codecs | No generic V4L2 stateless decoder integration in this release |
