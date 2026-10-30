@@ -1,0 +1,52 @@
+{
+  "diagnostic_only": true,
+  "release_unchanged": "7.3_rc7-r18",
+  "capture_kernel": "7.3_rc7-r24",
+  "firmware": "14.66.33.p63",
+  "capture_trigger": "first malformed receive frame, before its command watchdog",
+  "chronology_uptime_seconds": {
+    "earlier_bluetooth_command_timeout": 185.649309,
+    "earlier_wlan_rssi_timeout": 186.928813,
+    "earlier_card_removal_for_recovery": 187.154731,
+    "malformed_response_capture": 191.546566,
+    "subsequent_addba_response_command_timeout": 201.647419,
+    "subsequent_card_removal_for_recovery": 201.873199
+  },
+  "controller_registers_at_malformed_response": {
+    "argument": "0x12000100",
+    "transfer_mode": "0x13",
+    "present_state": "0x01f60000",
+    "host_control": "0x16",
+    "clock_control": "0x107",
+    "timeout_control": "0x0c",
+    "interrupt_status": "0x0",
+    "host_control2": "0x0",
+    "adma_error": "0x0",
+    "response0": "0x2000",
+    "fifo_104": "0x5",
+    "burst_10a": "0xce",
+    "rx_114": "0x0",
+    "tx_118": "0x290070"
+  },
+  "decoded": {
+    "clock_hz": 26000000,
+    "last_command": "CMD53 function 1, fixed address 0x10000, byte-mode read of 256 bytes",
+    "command_and_data_inhibit": false,
+    "all_four_dat_lines_and_cmd_high": true,
+    "internal_clock_enabled_and_stable": true,
+    "card_clock_enabled": true,
+    "automatic_bus_clock_gating_bit_set": false,
+    "r5_error_bits_set": false,
+    "receive_length_field": 33001,
+    "received_buffer_bytes": 256
+  },
+  "limitations": [
+    "Snapshot follows an earlier RSSI/HCI stall and card recovery; it does not capture the initiating stall.",
+    "Completed CMD53 and idle controller do not prove that received bytes were correct.",
+    "Firmware output, protocol handling and host buffer/coherency corruption remain unresolved.",
+    "Paired-phone test failed its sanity echo; no full paired-phone transfer run completed.",
+    "Short transfer/reconnect passes were followed by failures on the same boot."
+  ],
+  "reliability_fixed": false,
+  "raw_payload_and_device_addresses_omitted": true
+}

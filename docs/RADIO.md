@@ -50,6 +50,20 @@ The PIO comparison used the same AP and firmware, with eMMC and microSD still on
 
 The existing legacy format work corresponds to the [SD8777 timeout RFC](https://lists.openwall.net/linux-kernel/2025/10/26/357). Vendor comparisons used [Samsung/Marvell's pinned tree](https://github.com/T110-pmOS/linux_kernel_pxa988/tree/fb2f8b6cd86864c0fcac790e97a372b1772003c7/drivers/marvell/sd8787), including WLAN firmware structures/defaults and `mbtc_src/bt/bt_sdiommc.c`. The vendor sources were checked locally. Reapplying the original partial TxPD workaround is not a new fix.
 
+## Focused controller capture (30 October 2026)
+
+The later private diagnostics did not establish a new reliability fix. The public kernel remains r18; raw receive-payload logging, a cross-driver register-capture hook, optional non-HT mode and the experimental clock-delay change are not part of this release.
+
+Additional controls reproduced failures with the Bluetooth hardware driver absent, with stock p46 firmware, with non-HT Wi-Fi, and with both CPUs temporarily kept runnable. An explicit zero host clock-delay candidate also failed. These controls reject those changes as sufficient fixes; they do not identify a single root cause. A 13 MHz attempt overlapped recovery and is excluded as an uncontrolled comparison. Live host unbinding once froze the tablet and is not recommended as a recovery procedure.
+
+The final diagnostic first passed 96 MiB of checksummed Wi-Fi traffic with discovery and three Bluetooth power/WLAN reconnect cycles. Those were short observation windows: a later phone sanity echo failed, HCI command 0x0405 timed out at uptime 185.649 s, and WLAN RSSI command 0xa4 timed out at 186.929 s. Recovery removed and reinitialized the shared card.
+
+At 191.547 s, after that recovery, a 256-byte control-port read completed but its received length field was 33001. The diagnostic captured SDHCI registers immediately on detecting the malformed frame. CMD53 had finished; command/data inhibit bits were clear, all four DAT lines and CMD were high, the 26 MHz card clock was enabled and stable, and interrupt status and ADMA error were zero. The last command was a function-1 fixed-address, byte-mode read of 256 bytes. Its R5 response had no error bits. `HOST_CONTROL2=0` and `FIFO_PARAM=0x5` also showed the vendor-style automatic bus clock-gating bits clear. The subsequent ADDBA-response command 0xcf timed out about 10.101 s later, causing another card reset.
+
+This establishes that **this malformed-response failure was observed with a completed transfer and an idle, clocked controller**, rather than DAT0 already stuck busy. It does not establish that the bytes were correct or explain the earlier RSSI/HCI stall. Firmware output, protocol/framing handling and host-side buffer/coherency corruption remain possible. A later command-timeout counter during recovery must not be confused with the initiating failure. The timeout-only hook never fired for this sequence because there was no data timeout.
+
+The [sanitized controller capture](../tests/results/r24-controller-capture.json) records register values and chronology without packet payloads or device addresses. The associated successful bulk interval and failed phone sanity check are also recorded. No sustained phone echo/coexistence success is claimed. Diagnostic kernels and temporary settings are removed for normal use; further work should target the first firmware-command stall and receive-buffer integrity, rather than assume clock gating or Bluetooth alone is responsible.
+
 ## Reproduce without publishing private logs
 
 Install Paramiko on the host. Pin the tablet's SSH host key in your own known_hosts file, and provide your own key and network addresses. For example:

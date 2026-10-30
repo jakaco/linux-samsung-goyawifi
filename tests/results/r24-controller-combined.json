@@ -1,0 +1,45 @@
+{
+  "kernel": "7.3.0-rc7-goyawifi",
+  "bytes_per_direction_per_round": 16777216,
+  "scan_seconds": 60,
+  "scan_transport": "auto",
+  "rounds": [
+    {
+      "round": 1,
+      "upload_seconds": 23.687,
+      "download_seconds": 29.859,
+      "both_checksums_match": true
+    },
+    {
+      "round": 2,
+      "upload_seconds": 7.047,
+      "download_seconds": 12.298,
+      "both_checksums_match": true
+    },
+    {
+      "round": 3,
+      "upload_seconds": 6.553,
+      "download_seconds": 8.332,
+      "both_checksums_match": true
+    }
+  ],
+  "kernel_build": "#25-samsung-goyawifi SMP Fri Oct 30 21:51:32 UTC 2026",
+  "bluetooth_auto_sleep": "1",
+  "firmware": "version string: w8777-A0, RF878X, FP66, 14.66.33.p63, BT_SDIO",
+  "taint_before": "0",
+  "log_contiguous": true,
+  "taint_after": "0",
+  "kernel_failure_counts": {
+    "Timeout cmd id": 0,
+    "host_to_card failed": 0,
+    "write CFG reg failed": 0,
+    "unknown upload type": 0,
+    "invalid packet,": 0,
+    "card_to_host_mpa failed": 0,
+    "card 0001 removed": 0,
+    "no free cmd node": 0,
+    "Opcode": 0
+  },
+  "pass": true,
+  "scope_note": "Bounded interval only; later failures occurred on the same boot."
+}
