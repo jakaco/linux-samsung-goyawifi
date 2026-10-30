@@ -17,7 +17,9 @@ jobs:
         run: python3 test-image-layout.py
       - name: Check actual A-MSDU firmware descriptor bytes
         run: python3 tests/test-txpd-layout.py --source kernel-work/linux-f909e534f5e34feb2ea2701d54df63e21aa506fc
+      - name: Check actual camera stream-restart lifecycle
+        run: python3 tests/test-camera-restart.py --source kernel-work/linux-f909e534f5e34feb2ea2701d54df63e21aa506fc
       - name: Python and shell syntax
         run: |
-          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py tests/radio-stress.py tests/test-txpd-layout.py
+          python3 -m py_compile prepare-source.py goyawifi-mkbootimg.py test-image-layout.py tests/radio-stress.py tests/test-txpd-layout.py tests/test-camera-restart.py tests/camera-stream-restart.py
           sh -n build-kernel.sh

@@ -1,0 +1,34 @@
+{
+  "same_open_fd": true,
+  "set_format_calls": 0,
+  "cycles": [
+    {
+      "cycle": 1,
+      "complete_frames": 6,
+      "distinct_frames": 6,
+      "seconds": 3.005
+    },
+    {
+      "cycle": 2,
+      "complete_frames": 6,
+      "distinct_frames": 6,
+      "seconds": 3.24
+    },
+    {
+      "cycle": 3,
+      "complete_frames": 6,
+      "distinct_frames": 6,
+      "seconds": 1.939
+    }
+  ],
+  "format": {
+    "width": 640,
+    "height": 480,
+    "fourcc": "UYVY",
+    "sizeimage": 614400
+  },
+  "pass": true,
+  "kernel_recipe": "7.3_rc7-r26",
+  "normal_user": true,
+  "images_saved": false
+}

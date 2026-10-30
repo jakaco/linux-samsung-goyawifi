@@ -134,7 +134,7 @@
     "drivers/media/i2c/Makefile": "725e7158c486d3a4e0a48aa3f68e4a428810ff524cb2bec9479fecc1048d71b4",
     "drivers/media/i2c/sr200pc20m-t110-regs.h": "0086e7dc16db88102ed5163326df3c14cfbbe84f7f266d1c3f2f07ad28056124",
     "drivers/media/i2c/sr200pc20m-t110.c": "b1d91f221703d34d04529ca8c7eed51504bf534cc464081743285131000a30c6",
-    "drivers/media/platform/marvell/mcam-core.c": "59340bb5c5432dc3c11776ccd26617ae778c595f879424a5f5464323cdf320e7",
+    "drivers/media/platform/marvell/mcam-core.c": "363a689f83ce93217911656b13657a51312df7228d489aa846cd26f2ede0fe31",
     "drivers/media/platform/marvell/mcam-core.h": "67c8a8e9afa1aeb71d21d6d472a8e6f55b96ff0ce64b8bc2fa119d4705e8bd2c",
     "drivers/media/platform/marvell/mmp-driver.c": "2723a80606b215c07363a4b22ed6bc4889404b685ec836c7f8c3cda5b2b654c5",
     "drivers/net/wireless/marvell/mwifiex/11n_aggr.c": "9e905b30f7d3f99aef17735493b6339c3b58fc6e74b0f9b9d3b4263e2f3d2955",

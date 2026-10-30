@@ -3,7 +3,7 @@ maintainer=""
 _flavor=samsung-goyawifi
 pkgname=linux-$_flavor
 pkgver=7.3_rc7
-pkgrel=18
+pkgrel=26
 pkgdesc="Samsung SM-T110 PXA986 close-to-mainline kernel"
 arch="armv7"
 _carch="arm"
@@ -46,6 +46,6 @@ sha512sums="
 cd68c3305bf8ebdc886848b251952da083e15f6243420a8f96d89e9f6cd5935bf03a25d89ef8202177068c67c6393ad22977580eaa363303907ae54a19baf9e3  config-samsung-goyawifi.armv7
 c13789434a0942a30086106cad247a8b84cdc37c4ad8f7b3aed66c3b5238f080ae91243b1668c3ffb36b51a565716f6ea148b1c7929829081079919827415876  0001-arm-pxa986-goyawifi-platform.patch
 955107812c1aabfd5343ebf80994a28feabbae1d835c7b5d0f4799072d4fe6ea02c918892f499563c60a9e9def3b4ffd55fe80d81f22e6ed0f6fc9eaeba1eb30  0002-input-power-and-shared-i2c.patch
-8b8bf5d81a9e9bda285b8eb04237c3faae3e38877f4be349417debd4cddd2f73be94a7890155acaecb0a1759d43351cfe1df7e58ef9fee7cb4e340590bb75fdd  0003-display-gpu-audio-camera-and-vpu.patch
+67a9d8a2b4892158549c796efcba0f18050851dfb99ba4f20ad2de6b4c3643907f10d66c67f330ebef678525bfe80e779acaf254ae79e725e8ac0adeff42ff9c  0003-display-gpu-audio-camera-and-vpu.patch
 10028393c17f8ee5d24c5ed3e1189ed2b759282a20442c8a32ecc8713a8f3fe7f32fd97bcc52a7a4dd0247b60913415d74e810b701cc7e4ad3c16bd7da0371bd  0004-sd8777-wifi-bluetooth.patch
 "

@@ -8,7 +8,7 @@ Image parameters are Android header v0, page size 2048, base 0x10000000, kernel 
 
 The tested installation preserves the outer Samsung layout, bootloader, EFS and recovery. Its combined distribution GPT image is inside USER, with loop-mapped pmOS_boot and pmOS_root. The normal generated boot image contains filesystem UUIDs for its matching rootfs. **Do not flash a boot image built for another rootfs's UUIDs.** Never write a partition image to the whole eMMC device.
 
-Keep the kernel, DTB and modules as a matching build. A successful compile or structural image test does not establish that a freshly generated rootfs boots. The r18 packages were tested through normal upgrades on the installed system, not by distributing a universal flashable image.
+Keep the kernel, DTB and modules as a matching build. A successful compile or structural image test does not establish that a freshly generated rootfs boots. The r26 packages were tested through normal upgrades on the installed system, not by distributing a universal flashable image.
 
 No hardware UART was available during development. A working TWRP recovery can retrieve persistent last-kmsg logs after some failed boots. The tested physical recovery sequence is Volume Up + Home + Power. Keep USB connected and collect logs before another reboot when possible. Do not depend on software recovery reboot selection: its new restart-prepare code is included, but the current restart2 tests returned to Linux.
 

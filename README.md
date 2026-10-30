@@ -26,19 +26,21 @@ USB networking uses the normal initramfs configfs gadget. The accompanying gener
 
 **Known blockers:** intermittent shared Wi-Fi/Bluetooth firmware/bus stalls; normal distro suspend not reliable; DDR self-refresh unproven; shared-I2C stall root cause unresolved; GPS and video decoding lack complete generic kernel/media-stack integration. Proprietary firmware and the previous custom userspace decoders are not included. Stock mpv will not automatically gain hardware decoding.
 
+Camera stream-restart fixes and standard-app integration are described in [camera support](docs/CAMERA.md).
+
 The [radio investigation and reproducible stress test](docs/RADIO.md) records controlled results and rejected candidates. A successful short ping is not treated as a reliability fix.
 
 Phosh/Phoc uses hardware GLES2 composition, but modern GTK4 applications need Cairo rendering because their GL path requires GLES3. Unlock, typing, touch, brightness and screen blank/wake were owner-tested; Phosh remains sluggish. Weston is a lighter alternative. Screen blanking is not evidence of system suspend.
 
 ## Distribution integration and recovery
 
-See [postmarketOS integration](docs/POSTMARKETOS.md) for APK recipes, Phosh configuration and the initramfs patch. The pinned pmaports snapshot identifies its rootfs as Nura edge; this is not an official downloadable SM-T110 Phosh release. Latest local recipe revisions are kernel `7.3_rc7-r18`, device `5-r6`, and generic initramfs `3.12.5-r2`.
+See [postmarketOS integration](docs/POSTMARKETOS.md) for APK recipes, Phosh configuration and the initramfs patch. The pinned pmaports snapshot identifies its rootfs as Nura edge; this is not an official downloadable SM-T110 Phosh release. Latest local recipe revisions are kernel `7.3_rc7-r26`, device `5-r6`, and generic initramfs `3.12.5-r2`.
 
 Samsung's loader needs the supplied board packer/FDT initramfs handoff. A generic Android header-only packer is insufficient. KERNEL is **16 MiB**; split large distribution initramfs contents rather than enlarging the image. Read [boot and recovery](docs/RECOVERY.md) before writing anything. There are no universal private rootfs images, credentials, per-device radio addresses or signing keys here.
 
 ## Validation and contributions
 
-The kernel and device APKs were built in an isolated official pmbootstrap workflow. The installed r18 kernel booted; normal APK triggers generated and wrote its boot image, and every generated image byte was read back from KERNEL. Recovery remained unchanged. The separate standalone build passed earlier. Two ARM32 BPF arena `resolve_btfids` warnings remain; BPF arena support is not claimed.
+The kernel and device APKs were built in an isolated official pmbootstrap workflow. The installed r26 kernel booted; normal APK triggers generated and wrote its boot image, and every generated image byte was read back from KERNEL. Recovery remained unchanged. The separate standalone build passed earlier. Two ARM32 BPF arena `resolve_btfids` warnings remain; BPF arena support is not claimed.
 
 CI checks source preparation, boot-image layout, and actual A-MSDU/RX descriptor contracts; it does not boot hardware. Local metadata records source/package hashes. Package maintainer fields are intentionally unset until a real maintainer provides their identity. Nothing has been submitted to Linux or postmarketOS upstream. Contributions should include logs with personal identifiers removed, exact build versions and repeatable hardware tests.
 

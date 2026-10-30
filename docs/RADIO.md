@@ -52,7 +52,7 @@ The existing legacy format work corresponds to the [SD8777 timeout RFC](https://
 
 ## Focused controller capture (30 October 2026)
 
-The later private diagnostics did not establish a new reliability fix. The public kernel remains r18; raw receive-payload logging, a cross-driver register-capture hook, optional non-HT mode and the experimental clock-delay change are not part of this release.
+The later private diagnostics did not establish a new reliability fix. The public kernel at the time of this capture was r18; subsequent camera-only revisions retain the same radio patch; raw receive-payload logging, a cross-driver register-capture hook, optional non-HT mode and the experimental clock-delay change are not part of this release.
 
 Additional controls reproduced failures with the Bluetooth hardware driver absent, with stock p46 firmware, with non-HT Wi-Fi, and with both CPUs temporarily kept runnable. An explicit zero host clock-delay candidate also failed. These controls reject those changes as sufficient fixes; they do not identify a single root cause. A 13 MHz attempt overlapped recovery and is excluded as an uncontrolled comparison. Live host unbinding once froze the tablet and is not recommended as a recovery procedure.
 

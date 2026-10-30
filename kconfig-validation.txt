@@ -1,3 +1,3 @@
-[23:35:50] INFO: config-samsung-goyawifi.armv7: CONFIG_DM_CRYPT is preferably y, but currently m (category:default)[0m
-[23:35:50] kconfig check succeeded![0m
-[23:35:50] [92mDONE![0m[0m
+[23:14:46] INFO: config-samsung-goyawifi.armv7: CONFIG_DM_CRYPT is preferably y, but currently m (category:default)[0m
+[23:14:46] kconfig check succeeded![0m
+[23:14:46] [92mDONE![0m[0m

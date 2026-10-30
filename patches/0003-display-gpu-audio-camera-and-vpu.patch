@@ -1088,7 +1088,16 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	case V4L2_PIX_FMT_YUYV:
  		mcam_reg_write_mask(cam, REG_CTRL0,
  			C0_DF_YUV | C0_YUV_PACKED | C0_YUVE_NOSWAP, C0_DF_MASK);
-@@ -838,8 +840,9 @@
+@@ -800,8 +802,6 @@
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&cam->dev_lock, flags);
+-	clear_bit(CF_SG_RESTART, &cam->flags);
+-	cam->dma_setup(cam);
+ 	mcam_ctlr_image(cam);
+ 	mcam_set_config_needed(cam, 0);
+ 	spin_unlock_irqrestore(&cam->dev_lock, flags);
+@@ -838,8 +838,9 @@
  	 */
  	spin_lock_irqsave(&cam->dev_lock, flags);
  	clear_bit(CF_SG_RESTART, &cam->flags);
@@ -1100,7 +1109,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	spin_unlock_irqrestore(&cam->dev_lock, flags);
  	/*
  	 * This is a brutally long sleep, but experience shows that
-@@ -848,11 +851,12 @@
+@@ -848,11 +849,12 @@
  	 * sometimes (on mmp) get a frame at the end WITHOUT the
  	 * start-of-frame indication.
  	 */
@@ -1114,7 +1123,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	mcam_ctlr_irq_disable(cam);
  	spin_unlock_irqrestore(&cam->dev_lock, flags);
  }
-@@ -959,7 +963,9 @@
+@@ -959,7 +961,9 @@
  static unsigned long mclk_recalc_rate(struct clk_hw *hw,
  				unsigned long parent_rate)
  {
@@ -1125,7 +1134,35 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  }
  
  static const struct clk_ops mclk_ops = {
-@@ -1131,6 +1137,13 @@
+@@ -1058,7 +1062,13 @@
+ 	 */
+ 	spin_lock_irqsave(&cam->dev_lock, flags);
+ 	clear_bit(CF_DMA_ACTIVE, &cam->flags);
++	clear_bit(CF_SG_RESTART, &cam->flags);
+ 	mcam_reset_buffers(cam);
++	/* STREAMOFF returns all DMA buffers, even if the format is retained.
++	 * Every new stream must program its newly queued buffers before DMA
++	 * starts; image configuration alone is not a stream lifetime boundary.
++	 */
++	cam->dma_setup(cam);
+ 	if (cam->bus_type == V4L2_MBUS_CSI2_DPHY)
+ 		mcam_enable_mipi(cam);
+ 	else
+@@ -1068,6 +1078,13 @@
+ 	if (!test_bit(CF_SG_RESTART, &cam->flags))
+ 		mcam_ctlr_start(cam);
+ 	spin_unlock_irqrestore(&cam->dev_lock, flags);
++	if (cam->t110_csi) {
++		ret = sensor_call(cam, video, s_stream, 1);
++		if (ret) {
++			mcam_ctlr_stop_dma(cam);
++			return ret;
++		}
++	}
+ 	return 0;
+ }
+ 
+@@ -1131,6 +1148,13 @@
  		buf = cam->vb_bufs[i];
  
  		if (buf) {
@@ -1139,7 +1176,22 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  			vb2_buffer_done(&buf->vb_buf.vb2_buf, state);
  			cam->vb_bufs[i] = NULL;
  		}
-@@ -1338,7 +1351,9 @@
+@@ -1195,6 +1219,14 @@
+ 	if (cam->state != S_STREAMING)
+ 		return;
+ 	mcam_ctlr_stop_dma(cam);
++	if (cam->t110_csi) {
++		unsigned long flags;
++
++		sensor_call(cam, video, s_stream, 0);
++		spin_lock_irqsave(&cam->dev_lock, flags);
++		mcam_disable_mipi(cam);
++		spin_unlock_irqrestore(&cam->dev_lock, flags);
++	}
+ 	/*
+ 	 * VB2 reclaims the buffers, so we need to forget
+ 	 * about them.
+@@ -1338,7 +1370,9 @@
  static int mcam_vidioc_enum_fmt_vid_cap(struct file *filp,
  		void *priv, struct v4l2_fmtdesc *fmt)
  {
@@ -1150,7 +1202,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  		return -EINVAL;
  	fmt->pixelformat = mcam_formats[fmt->index].pixelformat;
  	return 0;
-@@ -1359,6 +1374,7 @@
+@@ -1359,6 +1393,7 @@
  	};
  	int ret;
  
@@ -1158,7 +1210,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	f = mcam_find_format(pix->pixelformat);
  	pix->pixelformat = f->pixelformat;
  	v4l2_fill_mbus_format(&format.format, pix, f->mbus_code);
-@@ -1374,7 +1390,7 @@
+@@ -1374,7 +1409,7 @@
  		pix->sizeimage = pix->height * pix->bytesperline;
  		break;
  	}
@@ -1167,7 +1219,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	return ret;
  }
  
-@@ -1709,8 +1725,15 @@
+@@ -1709,8 +1744,15 @@
  int mccic_irq(struct mcam_camera *cam, unsigned int irqs)
  {
  	unsigned int frame, handled = 0;
@@ -1183,7 +1235,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  	/*
  	 * Handle any frame completions.  There really should
  	 * not be more than one of these, or we have fallen
-@@ -1736,13 +1759,14 @@
+@@ -1736,13 +1778,14 @@
  	 * at once; may want to rethink that.
  	 */
  	for (frame = 0; frame < cam->nbufs; frame++) {
@@ -1200,7 +1252,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  		set_bit(CF_DMA_ACTIVE, &cam->flags);
  		if (cam->buffer_mode == B_DMA_sg)
  			mcam_ctlr_stop(cam);
-@@ -1869,6 +1893,7 @@
+@@ -1869,6 +1912,7 @@
  	mcam_set_config_needed(cam, 1);
  	cam->pix_format = mcam_def_pix_format;
  	cam->mbus_code = mcam_def_mbus_code;
@@ -1208,7 +1260,7 @@ diff --git a/drivers/media/platform/marvell/mcam-core.c b/drivers/media/platform
  
  	cam->notifier.ops = &mccic_notify_ops;
  	ret = v4l2_async_nf_register(&cam->notifier);
-@@ -1976,9 +2001,17 @@
+@@ -1976,9 +2020,17 @@
  		 */
  		if (cam->buffer_mode == B_DMA_sg && cam->vb_bufs[0])
  			list_add(&cam->vb_bufs[0]->queue, &cam->buffers);
